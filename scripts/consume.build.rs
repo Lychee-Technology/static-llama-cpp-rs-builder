@@ -28,13 +28,13 @@ fn main() {
     // This order is the canonical one in scripts/config.env (STATIC_LIBS) and equals
     // build-info.json's `link_line`; keep all three in sync. If you ever hit unresolved
     // symbols, the archives are safe to wrap in a linker group.
-    for lib in ["llama-common", "llama", "ggml", "ggml-cpu", "ggml-base"] {
+    for lib in ["llama", "ggml", "ggml-cpu", "ggml-base"] {
         println!("cargo:rustc-link-lib=static={lib}");
     }
 
     // C++ runtime + OS deps (== config.env SYSTEM_LINK_LIBS, == build-info.json link_line
-    // tail). Dynamic from the base image.
-    for lib in ["stdc++", "gomp", "pthread", "m", "dl"] {
+    // tail). Dynamic from the base image. No -lgomp: OpenMP is disabled (ggml threadpool).
+    for lib in ["stdc++", "pthread", "m", "dl"] {
         println!("cargo:rustc-link-lib=dylib={lib}");
     }
 

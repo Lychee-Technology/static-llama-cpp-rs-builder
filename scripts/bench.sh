@@ -33,19 +33,22 @@ if [[ ! -d "${SRC_BUILD}/.git" ]]; then
   log "fresh clone for from-source baseline: ${CRATE_REPO} @ ${CRATE_TAG}"
   git clone --depth 1 --branch "${CRATE_TAG}" --recursive "${CRATE_REPO}" "${SRC_BUILD}"
 fi
+# Same N1 tuning as build.sh so the comparison is apples-to-apples.
+patch_ggml_arm_arch "${SRC_BUILD}/llama-cpp-sys-2/build.rs" \
+  || { echo "[bench] failed to patch GGML_CPU_ARM_ARCH" >&2; exit 1; }
 export CFLAGS="${CFLAGS_TUNE} ${CFLAGS:-}"
 export CXXFLAGS="${CFLAGS_TUNE} ${CXXFLAGS:-}"
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
-log "building from-source baseline (features: ${CRATE_FEATURES}, CFLAGS=${CFLAGS})"
-( cd "${SRC_BUILD}" && cargo build --release -p llama-cpp-sys-2 --features "${CRATE_FEATURES}" )
+log "building from-source baseline (features: '${CRATE_FEATURES}', CFLAGS=${CFLAGS})"
+( cd "${SRC_BUILD}" && cargo build --release -p llama-cpp-sys-2 ${CRATE_FEATURES:+--features "${CRATE_FEATURES}"} )
 
-OUT_DIR="$(find "${SRC_BUILD}/target" -type d -name out -path '*release/build*llama-cpp-sys-2*' \
-             | head -n1)"
+# `-print -quit` (not `| head -n1`) to avoid SIGPIPE-failing find under `set -o pipefail`.
+OUT_DIR="$(find "${SRC_BUILD}/target" -type d -name out -path '*release/build*llama-cpp-sys-2*' -print -quit)"
 [[ -n "${OUT_DIR}" ]] || { echo "[bench] from-source OUT_DIR not found" >&2; exit 1; }
 for lib in ${STATIC_LIBS}; do
-  cp "$(find "${OUT_DIR}" -name "${lib}" | head -n1)" "${SRC_DIST}/lib/${lib}"
+  cp "$(find "${OUT_DIR}" -name "${lib}" -print -quit)" "${SRC_DIST}/lib/${lib}"
 done
-cp "$(find "${OUT_DIR}" -name bindings.rs | head -n1)" "${SRC_DIST}/bindings.rs"
+cp "$(find "${OUT_DIR}" -name bindings.rs -print -quit)" "${SRC_DIST}/bindings.rs"
 
 run() {  # $1 = label, $2 = STATIC_LLAMA_DIR, $3 = result file
   log "running '$1' workload (${ITERS} iters)"

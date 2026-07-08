@@ -6,7 +6,7 @@
 #
 # Output: $DIST/{lib,include,bindings.rs,build-info.json}
 #
-# Usage: scripts/build.sh   (run inside the pinned AL2023 aarch64 container)
+# Usage: scripts/build.sh   (run inside the AL2023 aarch64 build container)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,15 +24,22 @@ mkdir -p "${WORK}" "${DIST}/lib" "${DIST}/include"
 
 # --- 0. Build-environment envelope gate -------------------------------------------
 # The AL2023 base is resolved (not a controlled runtime pin), so guard against drift:
-# a different gcc major or an older glibc could change the C++ ABI / raise the runtime
+# a different clang major or an older glibc could change codegen/ABI or raise the runtime
 # floor. Fail fast if the observed toolchain leaves the supported envelope.
-GCC_MAJOR="$(${CC:-cc} -dumpversion 2>/dev/null | cut -d. -f1 || echo 0)"
-GLIBC_VER="$(ldd --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1 || echo 0)"
-log "Env: gcc major=${GCC_MAJOR} (expect ${EXPECTED_GCC_MAJOR}), glibc=${GLIBC_VER} (min ${MIN_GLIBC})"
-[[ "${GCC_MAJOR}" == "${EXPECTED_GCC_MAJOR}" ]] \
-  || die "ENVELOPE: gcc major ${GCC_MAJOR} != expected ${EXPECTED_GCC_MAJOR} (ABI drift risk)"
-# glibc must be >= MIN_GLIBC (string-sorted numeric compare via sort -V).
-if [[ "$(printf '%s\n%s\n' "${MIN_GLIBC}" "${GLIBC_VER}" | sort -V | head -n1)" != "${MIN_GLIBC}" ]]; then
+# Capture-then-parse full --version output (NOT `... | head -n1`): under `set -o pipefail`,
+# head closing the pipe early makes the tool exit via SIGPIPE and spuriously fail. Note we
+# parse `--version` (not -dumpversion — clang prints gcc-compat "4.2.1" for that).
+cc_raw="$(${CC:-cc} --version 2>/dev/null || true)"
+if [[ "${cc_raw}" =~ version[[:space:]]+([0-9]+) ]]; then CC_MAJOR="${BASH_REMATCH[1]}"; else CC_MAJOR="0"; fi
+glibc_raw="$(ldd --version 2>/dev/null || true)"
+if [[ "${glibc_raw}" =~ ([0-9]+\.[0-9]+) ]]; then GLIBC_VER="${BASH_REMATCH[1]}"; else GLIBC_VER="0"; fi
+log "Env: ${CC:-cc} major=${CC_MAJOR} (expect ${EXPECTED_CLANG_MAJOR}), glibc=${GLIBC_VER} (min ${MIN_GLIBC})"
+[[ "${CC_MAJOR}" == "${EXPECTED_CLANG_MAJOR}" ]] \
+  || die "ENVELOPE: clang major ${CC_MAJOR} != expected ${EXPECTED_CLANG_MAJOR} (codegen/ABI drift risk)"
+# glibc must be >= MIN_GLIBC — integer major/minor compare (whitespace-immune).
+gmaj="${GLIBC_VER%%.*}"; gmin="${GLIBC_VER#*.}"; gmin="${gmin%%.*}"
+mmaj="${MIN_GLIBC%%.*}"; mmin="${MIN_GLIBC#*.}"; mmin="${mmin%%.*}"
+if (( gmaj < mmaj || (gmaj == mmaj && gmin < mmin) )); then
   die "ENVELOPE: glibc ${GLIBC_VER} is below the supported floor ${MIN_GLIBC}"
 fi
 
@@ -53,10 +60,15 @@ if [[ "${LLAMA_CPP_COMMIT}" != "${EXPECTED_LLAMA_CPP_COMMIT}" ]]; then
        Upstream drift: verify and update EXPECTED_LLAMA_CPP_COMMIT + bump the contract."
 fi
 
-# --- 2. Build the -sys crate with N1 tuning injected via CFLAGS -------------------
-# On Linux aarch64 the crate adds NO -march of its own (only Android does), so our
-# -mcpu is the sole architecture flag => no -march/-mcpu conflict. We deliberately do
-# NOT set target-cpu (that would make the crate emit an invalid `-march=neoverse-n1`).
+# Point ggml's CPU backend at N1's ISA (dotprod) instead of its default -march=armv8-a.
+patch_ggml_arm_arch "${SRC}/llama-cpp-sys-2/build.rs" \
+  || die "Failed to inject GGML_CPU_ARM_ARCH into build.rs (upstream layout changed?)"
+log "Patched build.rs: GGML_CPU_ARM_ARCH=${CPU_MARCH}"
+
+# --- 2. Build the -sys crate with N1 tuning ---------------------------------------
+# CFLAGS/CXXFLAGS apply -O3 -march=${CPU_MARCH} -mtune to ALL TUs. ggml also adds
+# -march=${CPU_MARCH} to its CPU kernels (via the GGML_CPU_ARM_ARCH patch above) — the
+# SAME value, so there is no conflict. No -mcpu, no -flto (see config.env).
 export CFLAGS="${CFLAGS_TUNE} ${CFLAGS:-}"
 export CXXFLAGS="${CFLAGS_TUNE} ${CXXFLAGS:-}"
 export CMAKE_EXPORT_COMPILE_COMMANDS=ON        # for the flag-verification gate
@@ -64,22 +76,25 @@ export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
 
 # No --target: host == target (native aarch64), so plain CFLAGS is reliably honored by
 # cc/cmake-rs. The triple is still recorded in build-info.json for provenance.
-log "Building llama-cpp-sys-2 (features: ${CRATE_FEATURES})"
+log "Building llama-cpp-sys-2 (features: '${CRATE_FEATURES}')"
 log "  CFLAGS=${CFLAGS}"
-( cd "${SRC}" && cargo build --release -p llama-cpp-sys-2 --features "${CRATE_FEATURES}" )
+# Omit --features entirely when empty (cargo treats `--features ""` inconsistently).
+( cd "${SRC}" && cargo build --release -p llama-cpp-sys-2 ${CRATE_FEATURES:+--features "${CRATE_FEATURES}"} )
 
-OUT_DIR="$(find "${SRC}/target" -type d -name out -path '*release/build*llama-cpp-sys-2*' \
-             | head -n1)"
+# `-print -quit` (not `| head -n1`) to avoid SIGPIPE-failing find under `set -o pipefail`.
+OUT_DIR="$(find "${SRC}/target" -type d -name out -path '*release/build*llama-cpp-sys-2*' -print -quit)"
 [[ -n "${OUT_DIR}" ]] || die "Could not locate llama-cpp-sys-2 OUT_DIR"
 log "OUT_DIR=${OUT_DIR}"
 
 # --- 3. Flag-verification gate (PER compile command) ------------------------------
 # The contract claims the archives are Neoverse-N1 tuned, so we prove it per translation
-# unit rather than on the union of flags. For EVERY compile command:
-#   * no command may use native or a conflicting -mcpu/-march (fatal), and
-#   * every command that compiles a C/C++ source (.c/.cc/.cpp/.cxx) MUST carry
-#     -mcpu=neoverse-n1 (an untuned C/C++ TU fails the gate).
-CC_JSON="$(find "${OUT_DIR}" -name compile_commands.json | head -n1)"
+# unit. For EVERY compile command:
+#   * no command may use `native` (fatal — N1-illegal insns on Graviton2),
+#   * no command may use -mcpu, or any -march other than ${CPU_MARCH} (e.g. a stray
+#     armv8-a would strip dotprod) — fatal,
+#   * every C/C++ TU (.c/.cc/.cpp/.cxx) must carry -mtune=${CPU_MTUNE},
+#   * the dotprod -march=${CPU_MARCH} must appear on the CPU-backend TUs (>=1).
+CC_JSON="$(find "${OUT_DIR}" -name compile_commands.json -print -quit)"
 [[ -n "${CC_JSON}" ]] || die "compile_commands.json not found; cannot verify flags"
 
 # CMake emits either .command (string) or .arguments (array) depending on generator.
@@ -89,48 +104,62 @@ while IFS= read -r line; do CMDS+=("${line}"); done \
   < <(jq -r '.[] | (.command // (.arguments | join(" ")))' "${CC_JSON}")
 [[ "${#CMDS[@]}" -gt 0 ]] || die "compile_commands.json had no entries"
 
-ccxx_total=0; tuned=0; conflicts=0; untuned=0; conflict_examples=""; untuned_examples=""
+ccxx_total=0; dotprod=0; conflicts=0; untuned=0; badopt=0
+conflict_examples=""; untuned_examples=""; badopt_examples=""
 for cmd in "${CMDS[@]}"; do
-  # native anywhere is fatal (would emit N1-illegal insns on Graviton2).
+  # native anywhere is fatal.
   if grep -qE -- '-mcpu=native|-march=native' <<<"${cmd}"; then
     conflicts=$((conflicts+1)); conflict_examples+="[native] "; continue
   fi
-  # any -mcpu other than ours, or any -march at all, is a conflict.
-  bad_mcpu="$(grep -oE -- '-mcpu=[^ ]+' <<<"${cmd}" | grep -v -- "-mcpu=${CPU_MCPU}" || true)"
-  any_march="$(grep -oE -- '-march=[^ ]+' <<<"${cmd}" || true)"
-  if [[ -n "${bad_mcpu}" || -n "${any_march}" ]]; then
-    conflicts=$((conflicts+1)); conflict_examples+="${bad_mcpu}${any_march} "
+  # LTO anywhere is fatal: clang -flto emits LLVM bitcode objects, unlinkable as a
+  # native prebuilt .a by the consumer's GNU ld / rustc cc driver.
+  if grep -qE -- '-flto' <<<"${cmd}"; then
+    conflicts=$((conflicts+1)); conflict_examples+="[flto] "; continue
   fi
-  has_tune=0; grep -q -- "-mcpu=${CPU_MCPU}" <<<"${cmd}" && has_tune=1
-  [[ "${has_tune}" -eq 1 ]] && tuned=$((tuned+1))
-  # Is this a C/C++ compilation (vs link/asm/other)? Require our tuning on it.
+  # -mcpu should never appear; any -march other than our exact CPU_MARCH is a conflict.
+  bad_mcpu="$(grep -oE -- '-mcpu=[^ ]+' <<<"${cmd}" || true)"
+  bad_march="$(grep -oE -- '-march=[^ ]+' <<<"${cmd}" | grep -v -- "-march=${CPU_MARCH}" || true)"
+  if [[ -n "${bad_mcpu}" || -n "${bad_march}" ]]; then
+    conflicts=$((conflicts+1)); conflict_examples+="${bad_mcpu}${bad_march} "
+  fi
+  grep -q -- "-march=${CPU_MARCH}" <<<"${cmd}" && dotprod=$((dotprod+1)) || true
+  # Per C/C++ TU: require -mtune (N1 scheduling) AND effective -O3 (last -O flag == -O3).
   if grep -qiE -- '-c( |$)' <<<"${cmd}" && grep -qiE -- '\.(c|cc|cpp|cxx|c\+\+)( |$|")' <<<"${cmd}"; then
     ccxx_total=$((ccxx_total+1))
-    if [[ "${has_tune}" -eq 0 ]]; then
-      untuned=$((untuned+1))
-      untuned_examples+="$(grep -oE -- '[^ ]+\.(c|cc|cpp|cxx|c\+\+)' <<<"${cmd}" | head -n1) "
+    src="$(grep -oE -- '[^ ]+\.(c|cc|cpp|cxx|c\+\+)' <<<"${cmd}" | head -n1 || true)"
+    if ! grep -q -- "-mtune=${CPU_MTUNE}" <<<"${cmd}"; then
+      untuned=$((untuned+1)); untuned_examples+="${src} "
+    fi
+    # Effective optimization = the LAST -O flag on the command line.
+    last_opt="$(grep -oE -- '-O[0-9sgz]' <<<"${cmd}" | tail -n1 || true)"
+    if [[ "${last_opt}" != "-O3" ]]; then
+      badopt=$((badopt+1)); badopt_examples+="${src}(${last_opt:-none}) "
     fi
   fi
 done
 
-log "Flag gate: ${#CMDS[@]} cmds, ${ccxx_total} C/C++ TUs, ${tuned} tuned, ${conflicts} conflicts, ${untuned} untuned"
-[[ "${conflicts}" -eq 0 ]] || die "GATE: ${conflicts} command(s) with conflicting/native arch flags: ${conflict_examples}"
+log "Flag gate: ${#CMDS[@]} cmds, ${ccxx_total} C/C++ TUs, ${dotprod} with -march=${CPU_MARCH}, ${conflicts} conflicts, ${untuned} untuned, ${badopt} not -O3"
+[[ "${conflicts}" -eq 0 ]] || die "GATE: ${conflicts} command(s) with native/flto/conflicting flags: ${conflict_examples}"
 [[ "${ccxx_total}" -gt 0 ]] || die "GATE: no C/C++ compile commands seen; cannot verify tuning"
-[[ "${untuned}" -eq 0 ]] || die "GATE: ${untuned} C/C++ TU(s) not tuned for ${CPU_MCPU}: ${untuned_examples}"
-EFFECTIVE_FLAGS="-mcpu=${CPU_MCPU}"
+[[ "${untuned}" -eq 0 ]] || die "GATE: ${untuned} C/C++ TU(s) missing -mtune=${CPU_MTUNE}: ${untuned_examples}"
+[[ "${badopt}" -eq 0 ]] || die "GATE: ${badopt} C/C++ TU(s) not built at effective -O3: ${badopt_examples}"
+[[ "${dotprod}" -gt 0 ]] || die "GATE: -march=${CPU_MARCH} never applied — CPU backend not dotprod-tuned"
+EFFECTIVE_FLAGS="-O3 -march=${CPU_MARCH} -mtune=${CPU_MTUNE}"
 ARCH_SUMMARY="$(jq -n --argjson cmds "${#CMDS[@]}" --argjson ccxx "${ccxx_total}" \
-  --argjson tuned "${tuned}" --argjson conflicts "${conflicts}" --argjson untuned "${untuned}" \
-  '{compile_commands:$cmds, ccxx_tus:$ccxx, tuned:$tuned, conflicts:$conflicts, untuned:$untuned}')"
-log "GATE PASSED: all ${ccxx_total} C/C++ TUs tuned for ${CPU_MCPU}, no conflicts"
+  --argjson dotprod "${dotprod}" --argjson conflicts "${conflicts}" --argjson untuned "${untuned}" \
+  --argjson badopt "${badopt}" --arg march "${CPU_MARCH}" --arg mtune "${CPU_MTUNE}" \
+  '{compile_commands:$cmds, ccxx_tus:$ccxx, march:$march, mtune:$mtune,
+    dotprod_march_tus:$dotprod, conflicts:$conflicts, untuned:$untuned, not_o3:$badopt}')"
+log "GATE PASSED: ${ccxx_total} C/C++ TUs -O3 -mtune=${CPU_MTUNE}, ${dotprod} dotprod-tuned, no conflicts/flto"
 
 # --- 4. Harvest artifacts ---------------------------------------------------------
 for lib in ${STATIC_LIBS}; do
-  found="$(find "${OUT_DIR}" -name "${lib}" | head -n1)"
+  found="$(find "${OUT_DIR}" -name "${lib}" -print -quit)"
   [[ -n "${found}" ]] || die "Expected static lib ${lib} not found under OUT_DIR"
   cp -v "${found}" "${DIST}/lib/${lib}"
 done
 
-BINDINGS="$(find "${OUT_DIR}" -name bindings.rs | head -n1)"
+BINDINGS="$(find "${OUT_DIR}" -name bindings.rs -print -quit)"
 [[ -n "${BINDINGS}" ]] || die "generated bindings.rs not found"
 cp -v "${BINDINGS}" "${DIST}/bindings.rs"
 
@@ -157,9 +186,9 @@ jq -n \
   --arg image         "${COMPILER_IMAGE:-amazonlinux:2023 (unrecorded)}" \
   --arg cc            "$(${CC:-cc} --version | head -n1)" \
   --arg cxx           "$(${CXX:-c++} --version | head -n1)" \
-  --arg pkgs          "$(command -v rpm >/dev/null && rpm -q glibc gcc gcc-c++ libstdc++ libgomp 2>/dev/null | tr '\n' ';' || echo 'rpm-unavailable')" \
+  --arg pkgs          "$(command -v rpm >/dev/null && rpm -q glibc libstdc++ gcc clang18 llvm18-libs 2>/dev/null | tr '\n' ';' || echo 'rpm-unavailable')" \
   --arg triple        "${TARGET_TRIPLE}" \
-  --arg cpu           "${CPU_MCPU}" \
+  --arg cpu           "${CPU_MTUNE}" \
   --arg flags         "${EFFECTIVE_FLAGS}" \
   --arg features      "${CRATE_FEATURES}" \
   --arg link_line     "$(echo "${LINK_LINE}" | xargs)" \

@@ -1,10 +1,12 @@
 # Build image for Graviton2-optimized static llama-cpp-rs artifacts.
 #
-# Base: Amazon Linux 2023 (aarch64) — the compiler baseline (glibc 2.34, gcc 11). This is
-# resolved-and-recorded build provenance, NOT a runtime pin (LTEmbed runs on AWS-managed
-# AL2023). CI resolves the current digest, records it in build-info.json, and gates the
-# environment envelope (EXPECTED_GCC_MAJOR / MIN_GLIBC). For a reproducible build against a
-# specific patch level, override: docker build --build-arg AL2023_DIGEST=2023@sha256:<...> .
+# Base: Amazon Linux 2023 (aarch64) — the compiler baseline (Clang 18, GNU libstdc++,
+# glibc 2.34). This is resolved-and-recorded build provenance, NOT a runtime pin (LTEmbed
+# runs on AWS-managed AL2023). CI resolves the current digest, records it in build-info.json,
+# and gates the environment envelope (EXPECTED_CLANG_MAJOR / MIN_GLIBC). To pin the base image
+# for a run (aids tracing; NOT full reproducibility — dnf still pulls current packages),
+# override:
+#   docker build --build-arg AL2023_DIGEST=2023@sha256:<...> .
 # The default is the plain tag.
 ARG AL2023_DIGEST=2023
 FROM amazonlinux:${AL2023_DIGEST}
@@ -13,15 +15,23 @@ FROM amazonlinux:${AL2023_DIGEST}
 ARG CMAKE_VERSION=3.29.6
 ARG RUST_VERSION=1.85.0
 
-# Toolchain: gcc/g++ 11 (AL2023 default), git, make, ninja, python (ggml scripts), curl.
+# Compiler: Clang 18 (clang18) — builds the archives AND (via libclang from clang18-devel)
+# drives bindgen. gcc/g++ are still installed because clang uses GNU libstdc++ headers/crt
+# on Linux and rustc links via the `cc` (gcc) driver. python for ggml scripts.
 RUN dnf -y update \
  && dnf -y install \
       gcc gcc-c++ \
+      clang18 clang18-devel \
       git make ninja-build \
       python3 python3-pip \
       tar gzip xz which findutils jq \
       openssl-devel perl \
  && dnf clean all
+
+# Compile with Clang 18. Binaries are version-suffixed (no unversioned `clang` on AL2023).
+ENV CC=clang-18 CXX=clang++-18
+# bindgen (clang-sys) locates libclang here on AL2023 (llvm18 tree, not /usr/lib64).
+ENV LIBCLANG_PATH=/usr/lib64/llvm18/lib
 
 # CMake pinned to an exact version (do not rely on the distro package).
 RUN set -eux; \

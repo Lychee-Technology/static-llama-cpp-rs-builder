@@ -58,5 +58,10 @@ cp -v "${ROOT}/CONTRACT.md" "${DIST}/CONTRACT.md"
     | sort -z | xargs -0 sha256sum > SHA256SUMS )
 log "Wrote ${DIST}/SHA256SUMS"
 
+# dist/ is produced as root inside the container, and build-info.json is finalized via
+# `mv $(mktemp) ...` (mode 600). Make every artifact world-readable so the non-root CI
+# steps (checksum verify, release upload) and downstream consumers can read them.
+chmod -R a+rX "${DIST}"
+
 log "Release contents:"
 ( cd "${DIST}" && find . -type f | sort )
