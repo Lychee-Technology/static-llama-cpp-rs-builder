@@ -1,0 +1,17 @@
+[package]
+name = "bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Times an embedding workload against whatever archives STATIC_LLAMA_DIR points at.
+# bench.sh runs it twice: once against the packaged release, once against a from-source
+# crate build, to prove the prebuilt path does not regress.
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+
+[workspace]

@@ -1,0 +1,77 @@
+name: build-static-llama-cpp
+
+# Builds Graviton2 (Neoverse N1) tuned static llama.cpp archives on a GitHub-managed
+# ARM64 runner (Neoverse N2, backward-compatible with N1), inside a pinned AL2023
+# container. Publishes verified artifacts as a GitHub Release on tag push.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create releases / upload assets
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm      # GitHub-hosted ARM64 (Neoverse N2)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve pinned AL2023 aarch64 digest
+        id: img
+        run: |
+          set -euo pipefail
+          digest="$(docker manifest inspect amazonlinux:2023 \
+            | jq -r '.manifests[] | select(.platform.architecture=="arm64") | .digest' | head -n1)"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "image=amazonlinux:2023@${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Build builder image
+        run: |
+          docker build --build-arg AL2023_DIGEST="2023@${{ steps.img.outputs.digest }}" \
+            -t static-llama-builder:ci .
+
+      - name: Build + smoke + bench + package (in container)
+        env:
+          SMOKE_MODEL_URL: ${{ vars.SMOKE_MODEL_URL }}
+          SMOKE_MODEL_SHA256: ${{ vars.SMOKE_MODEL_SHA256 }}
+          COMPILER_IMAGE: ${{ steps.img.outputs.image }}
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/work" -w /work \
+            -e SMOKE_MODEL_URL -e SMOKE_MODEL_SHA256 -e COMPILER_IMAGE \
+            static-llama-builder:ci bash -euo pipefail -c '
+              git config --global --add safe.directory "*"
+              bash scripts/build.sh
+              export SMOKE_MODEL="$(bash smoke/fixtures/fetch-model.sh)"
+              export RESULTS=/work/.build/results; mkdir -p "$RESULTS"
+              SMOKE_RESULT="$RESULTS/smoke.json" \
+                cargo run --release --manifest-path smoke/Cargo.toml
+              bash scripts/bench.sh
+              bash scripts/package.sh
+            '
+
+      - name: Verify checksums
+        run: cd dist && sha256sum -c SHA256SUMS
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-llama-cpp-aarch64-graviton2
+          path: dist/**
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          tar czf "../static-llama-cpp-${GITHUB_REF_NAME}-aarch64-graviton2.tar.gz" .
+          cd ..
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "static-llama-cpp ${GITHUB_REF_NAME}" \
+            --notes-file dist/build-info.json \
+            "static-llama-cpp-${GITHUB_REF_NAME}-aarch64-graviton2.tar.gz" \
+            dist/SHA256SUMS dist/build-info.json dist/CONTRACT.md
