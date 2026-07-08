@@ -20,7 +20,7 @@ Single source of truth: [`scripts/config.env`](scripts/config.env).
 | llama.cpp submodule | `9e3b928…` (verified at build time) |
 | Rust | `1.85.0` (`rust-toolchain.toml`) |
 | CMake | `3.29.6` (`Dockerfile`) |
-| CPU profile | `-mcpu=neoverse-n1` (never `native`) |
+| CPU profile | `-march=armv8.2-a+fp16+dotprod -mtune=neoverse-n1` (never `native`/`-mcpu`) |
 | Features | `common,openmp` |
 
 **Build image (not a pin):** `amazonlinux:2023` is **resolved at build time and recorded** in
@@ -32,7 +32,7 @@ force a reproducible build against a specific patch level.
 ## How it works
 
 1. `scripts/build.sh` — clones the pinned crate, builds `llama-cpp-sys-2` with
-   `-mcpu=neoverse-n1` injected via `CFLAGS`, runs a **flag-verification gate**
+   N1 tuning injected (ggml `GGML_CPU_ARM_ARCH` for dotprod + `-mtune`), runs a **flag-verification gate**
    (asserts N1 tuning, no `native`, no conflicting `-march`), harvests `.a` + bindings +
    headers into `dist/`, and writes `build-info.json`.
 2. **smoke** (`smoke/`) — links the archives and runs a real embedding/context-init test.

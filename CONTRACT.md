@@ -26,8 +26,10 @@ LICENSES/       llama.cpp, ggml, and builder licenses (all MIT)
 
 ## Build profile (v1)
 
-- Target: `aarch64-unknown-linux-gnu`, tuned **`-mcpu=neoverse-n1`** (Graviton2 / N1;
-  gives `+dotprod`). Built on an N2 runner but never with `-mcpu=native`.
+- Target: `aarch64-unknown-linux-gnu`, tuned for Graviton2 / N1 via
+  **`-march=armv8.2-a+fp16+dotprod`** (ISA, incl. dotprod — set through ggml's
+  `GGML_CPU_ARM_ARCH`) **`-mtune=neoverse-n1`** (scheduling). Built on an N2 runner but
+  never with `native`, and never `-mcpu` (it would collide with ggml's own `-march`).
 - Crate: `llama-cpp-sys-2` pinned tag `0.1.151`; features `common,openmp`.
 - Build image: `amazonlinux:2023` (aarch64), **resolved at build time** — not a controlled
   runtime pin. LTEmbed deploys on AWS-managed AL2023 (Lambda/Fargate) whose patch level AWS

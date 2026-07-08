@@ -60,10 +60,14 @@ if [[ "${LLAMA_CPP_COMMIT}" != "${EXPECTED_LLAMA_CPP_COMMIT}" ]]; then
        Upstream drift: verify and update EXPECTED_LLAMA_CPP_COMMIT + bump the contract."
 fi
 
-# --- 2. Build the -sys crate with N1 tuning injected via CFLAGS -------------------
-# On Linux aarch64 the crate adds NO -march of its own (only Android does), so our
-# -mcpu is the sole architecture flag => no -march/-mcpu conflict. We deliberately do
-# NOT set target-cpu (that would make the crate emit an invalid `-march=neoverse-n1`).
+# Point ggml's CPU backend at N1's ISA (dotprod) instead of its default -march=armv8-a.
+patch_ggml_arm_arch "${SRC}/llama-cpp-sys-2/build.rs" \
+  || die "Failed to inject GGML_CPU_ARM_ARCH into build.rs (upstream layout changed?)"
+log "Patched build.rs: GGML_CPU_ARM_ARCH=${CPU_MARCH}"
+
+# --- 2. Build the -sys crate with N1 tuning ---------------------------------------
+# ISA comes from GGML_CPU_ARM_ARCH (-> -march=${CPU_MARCH} on the CPU kernels, patched
+# above); CFLAGS carries only -mtune (N1 scheduling) so there is no -march/-mcpu conflict.
 export CFLAGS="${CFLAGS_TUNE} ${CFLAGS:-}"
 export CXXFLAGS="${CFLAGS_TUNE} ${CXXFLAGS:-}"
 export CMAKE_EXPORT_COMPILE_COMMANDS=ON        # for the flag-verification gate
@@ -82,10 +86,12 @@ log "OUT_DIR=${OUT_DIR}"
 
 # --- 3. Flag-verification gate (PER compile command) ------------------------------
 # The contract claims the archives are Neoverse-N1 tuned, so we prove it per translation
-# unit rather than on the union of flags. For EVERY compile command:
-#   * no command may use native or a conflicting -mcpu/-march (fatal), and
-#   * every command that compiles a C/C++ source (.c/.cc/.cpp/.cxx) MUST carry
-#     -mcpu=neoverse-n1 (an untuned C/C++ TU fails the gate).
+# unit. For EVERY compile command:
+#   * no command may use `native` (fatal — N1-illegal insns on Graviton2),
+#   * no command may use -mcpu, or any -march other than ${CPU_MARCH} (e.g. a stray
+#     armv8-a would strip dotprod) — fatal,
+#   * every C/C++ TU (.c/.cc/.cpp/.cxx) must carry -mtune=${CPU_MTUNE},
+#   * the dotprod -march=${CPU_MARCH} must appear on the CPU-backend TUs (>=1).
 CC_JSON="$(find "${OUT_DIR}" -name compile_commands.json -print -quit)"
 [[ -n "${CC_JSON}" ]] || die "compile_commands.json not found; cannot verify flags"
 
@@ -96,39 +102,41 @@ while IFS= read -r line; do CMDS+=("${line}"); done \
   < <(jq -r '.[] | (.command // (.arguments | join(" ")))' "${CC_JSON}")
 [[ "${#CMDS[@]}" -gt 0 ]] || die "compile_commands.json had no entries"
 
-ccxx_total=0; tuned=0; conflicts=0; untuned=0; conflict_examples=""; untuned_examples=""
+ccxx_total=0; dotprod=0; conflicts=0; untuned=0; conflict_examples=""; untuned_examples=""
 for cmd in "${CMDS[@]}"; do
-  # native anywhere is fatal (would emit N1-illegal insns on Graviton2).
+  # native anywhere is fatal.
   if grep -qE -- '-mcpu=native|-march=native' <<<"${cmd}"; then
     conflicts=$((conflicts+1)); conflict_examples+="[native] "; continue
   fi
-  # any -mcpu other than ours, or any -march at all, is a conflict.
-  bad_mcpu="$(grep -oE -- '-mcpu=[^ ]+' <<<"${cmd}" | grep -v -- "-mcpu=${CPU_MCPU}" || true)"
-  any_march="$(grep -oE -- '-march=[^ ]+' <<<"${cmd}" || true)"
-  if [[ -n "${bad_mcpu}" || -n "${any_march}" ]]; then
-    conflicts=$((conflicts+1)); conflict_examples+="${bad_mcpu}${any_march} "
+  # -mcpu should never appear; any -march other than our exact CPU_MARCH is a conflict.
+  bad_mcpu="$(grep -oE -- '-mcpu=[^ ]+' <<<"${cmd}" || true)"
+  bad_march="$(grep -oE -- '-march=[^ ]+' <<<"${cmd}" | grep -v -- "-march=${CPU_MARCH}" || true)"
+  if [[ -n "${bad_mcpu}" || -n "${bad_march}" ]]; then
+    conflicts=$((conflicts+1)); conflict_examples+="${bad_mcpu}${bad_march} "
   fi
-  has_tune=0; grep -q -- "-mcpu=${CPU_MCPU}" <<<"${cmd}" && has_tune=1
-  [[ "${has_tune}" -eq 1 ]] && tuned=$((tuned+1))
-  # Is this a C/C++ compilation (vs link/asm/other)? Require our tuning on it.
+  grep -q -- "-march=${CPU_MARCH}" <<<"${cmd}" && dotprod=$((dotprod+1)) || true
+  # Every C/C++ TU must carry -mtune (N1 scheduling).
   if grep -qiE -- '-c( |$)' <<<"${cmd}" && grep -qiE -- '\.(c|cc|cpp|cxx|c\+\+)( |$|")' <<<"${cmd}"; then
     ccxx_total=$((ccxx_total+1))
-    if [[ "${has_tune}" -eq 0 ]]; then
+    if ! grep -q -- "-mtune=${CPU_MTUNE}" <<<"${cmd}"; then
       untuned=$((untuned+1))
       untuned_examples+="$(grep -oE -- '[^ ]+\.(c|cc|cpp|cxx|c\+\+)' <<<"${cmd}" | head -n1 || true) "
     fi
   fi
 done
 
-log "Flag gate: ${#CMDS[@]} cmds, ${ccxx_total} C/C++ TUs, ${tuned} tuned, ${conflicts} conflicts, ${untuned} untuned"
+log "Flag gate: ${#CMDS[@]} cmds, ${ccxx_total} C/C++ TUs, ${dotprod} with -march=${CPU_MARCH}, ${conflicts} conflicts, ${untuned} untuned"
 [[ "${conflicts}" -eq 0 ]] || die "GATE: ${conflicts} command(s) with conflicting/native arch flags: ${conflict_examples}"
 [[ "${ccxx_total}" -gt 0 ]] || die "GATE: no C/C++ compile commands seen; cannot verify tuning"
-[[ "${untuned}" -eq 0 ]] || die "GATE: ${untuned} C/C++ TU(s) not tuned for ${CPU_MCPU}: ${untuned_examples}"
-EFFECTIVE_FLAGS="-mcpu=${CPU_MCPU}"
+[[ "${untuned}" -eq 0 ]] || die "GATE: ${untuned} C/C++ TU(s) missing -mtune=${CPU_MTUNE}: ${untuned_examples}"
+[[ "${dotprod}" -gt 0 ]] || die "GATE: -march=${CPU_MARCH} never applied — CPU backend not dotprod-tuned"
+EFFECTIVE_FLAGS="-march=${CPU_MARCH} -mtune=${CPU_MTUNE}"
 ARCH_SUMMARY="$(jq -n --argjson cmds "${#CMDS[@]}" --argjson ccxx "${ccxx_total}" \
-  --argjson tuned "${tuned}" --argjson conflicts "${conflicts}" --argjson untuned "${untuned}" \
-  '{compile_commands:$cmds, ccxx_tus:$ccxx, tuned:$tuned, conflicts:$conflicts, untuned:$untuned}')"
-log "GATE PASSED: all ${ccxx_total} C/C++ TUs tuned for ${CPU_MCPU}, no conflicts"
+  --argjson dotprod "${dotprod}" --argjson conflicts "${conflicts}" --argjson untuned "${untuned}" \
+  --arg march "${CPU_MARCH}" --arg mtune "${CPU_MTUNE}" \
+  '{compile_commands:$cmds, ccxx_tus:$ccxx, march:$march, mtune:$mtune,
+    dotprod_march_tus:$dotprod, conflicts:$conflicts, untuned:$untuned}')"
+log "GATE PASSED: ${ccxx_total} C/C++ TUs -mtune=${CPU_MTUNE}, ${dotprod} dotprod-tuned, no conflicts"
 
 # --- 4. Harvest artifacts ---------------------------------------------------------
 for lib in ${STATIC_LIBS}; do
@@ -166,7 +174,7 @@ jq -n \
   --arg cxx           "$(${CXX:-c++} --version | head -n1)" \
   --arg pkgs          "$(command -v rpm >/dev/null && rpm -q glibc gcc gcc-c++ libstdc++ libgomp 2>/dev/null | tr '\n' ';' || echo 'rpm-unavailable')" \
   --arg triple        "${TARGET_TRIPLE}" \
-  --arg cpu           "${CPU_MCPU}" \
+  --arg cpu           "${CPU_MTUNE}" \
   --arg flags         "${EFFECTIVE_FLAGS}" \
   --arg features      "${CRATE_FEATURES}" \
   --arg link_line     "$(echo "${LINK_LINE}" | xargs)" \

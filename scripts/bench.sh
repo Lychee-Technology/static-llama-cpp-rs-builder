@@ -33,6 +33,9 @@ if [[ ! -d "${SRC_BUILD}/.git" ]]; then
   log "fresh clone for from-source baseline: ${CRATE_REPO} @ ${CRATE_TAG}"
   git clone --depth 1 --branch "${CRATE_TAG}" --recursive "${CRATE_REPO}" "${SRC_BUILD}"
 fi
+# Same N1 tuning as build.sh so the comparison is apples-to-apples.
+patch_ggml_arm_arch "${SRC_BUILD}/llama-cpp-sys-2/build.rs" \
+  || { echo "[bench] failed to patch GGML_CPU_ARM_ARCH" >&2; exit 1; }
 export CFLAGS="${CFLAGS_TUNE} ${CFLAGS:-}"
 export CXXFLAGS="${CFLAGS_TUNE} ${CXXFLAGS:-}"
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
