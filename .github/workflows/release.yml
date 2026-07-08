@@ -16,7 +16,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04-arm      # GitHub-hosted ARM64 (Neoverse N2)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve AL2023 aarch64 digest
         id: img
@@ -67,7 +67,7 @@ jobs:
         run: cd dist && sha256sum -c SHA256SUMS
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: static-llama-cpp-aarch64-graviton2
           path: dist/**
