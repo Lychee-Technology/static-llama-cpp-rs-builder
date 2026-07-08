@@ -26,13 +26,20 @@ mkdir -p "${WORK}" "${DIST}/lib" "${DIST}/include"
 # The AL2023 base is resolved (not a controlled runtime pin), so guard against drift:
 # a different gcc major or an older glibc could change the C++ ABI / raise the runtime
 # floor. Fail fast if the observed toolchain leaves the supported envelope.
-GCC_MAJOR="$(${CC:-cc} -dumpversion 2>/dev/null | cut -d. -f1 || echo 0)"
-GLIBC_VER="$(ldd --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1 || echo 0)"
+# Capture-then-parse (NOT `... | head -n1`): under `set -o pipefail`, head closing the
+# pipe early makes the upstream tool exit via SIGPIPE, which would spuriously fail the
+# command and append the `|| echo 0` fallback to the captured value.
+gcc_raw="$(${CC:-cc} -dumpversion 2>/dev/null || true)"
+GCC_MAJOR="${gcc_raw%%.*}"; GCC_MAJOR="${GCC_MAJOR:-0}"
+glibc_raw="$(ldd --version 2>/dev/null || true)"
+if [[ "${glibc_raw}" =~ ([0-9]+\.[0-9]+) ]]; then GLIBC_VER="${BASH_REMATCH[1]}"; else GLIBC_VER="0"; fi
 log "Env: gcc major=${GCC_MAJOR} (expect ${EXPECTED_GCC_MAJOR}), glibc=${GLIBC_VER} (min ${MIN_GLIBC})"
 [[ "${GCC_MAJOR}" == "${EXPECTED_GCC_MAJOR}" ]] \
   || die "ENVELOPE: gcc major ${GCC_MAJOR} != expected ${EXPECTED_GCC_MAJOR} (ABI drift risk)"
-# glibc must be >= MIN_GLIBC (string-sorted numeric compare via sort -V).
-if [[ "$(printf '%s\n%s\n' "${MIN_GLIBC}" "${GLIBC_VER}" | sort -V | head -n1)" != "${MIN_GLIBC}" ]]; then
+# glibc must be >= MIN_GLIBC — integer major/minor compare (whitespace-immune).
+gmaj="${GLIBC_VER%%.*}"; gmin="${GLIBC_VER#*.}"; gmin="${gmin%%.*}"
+mmaj="${MIN_GLIBC%%.*}"; mmin="${MIN_GLIBC#*.}"; mmin="${mmin%%.*}"
+if (( gmaj < mmaj || (gmaj == mmaj && gmin < mmin) )); then
   die "ENVELOPE: glibc ${GLIBC_VER} is below the supported floor ${MIN_GLIBC}"
 fi
 
@@ -68,8 +75,8 @@ log "Building llama-cpp-sys-2 (features: ${CRATE_FEATURES})"
 log "  CFLAGS=${CFLAGS}"
 ( cd "${SRC}" && cargo build --release -p llama-cpp-sys-2 --features "${CRATE_FEATURES}" )
 
-OUT_DIR="$(find "${SRC}/target" -type d -name out -path '*release/build*llama-cpp-sys-2*' \
-             | head -n1)"
+# `-print -quit` (not `| head -n1`) to avoid SIGPIPE-failing find under `set -o pipefail`.
+OUT_DIR="$(find "${SRC}/target" -type d -name out -path '*release/build*llama-cpp-sys-2*' -print -quit)"
 [[ -n "${OUT_DIR}" ]] || die "Could not locate llama-cpp-sys-2 OUT_DIR"
 log "OUT_DIR=${OUT_DIR}"
 
@@ -79,7 +86,7 @@ log "OUT_DIR=${OUT_DIR}"
 #   * no command may use native or a conflicting -mcpu/-march (fatal), and
 #   * every command that compiles a C/C++ source (.c/.cc/.cpp/.cxx) MUST carry
 #     -mcpu=neoverse-n1 (an untuned C/C++ TU fails the gate).
-CC_JSON="$(find "${OUT_DIR}" -name compile_commands.json | head -n1)"
+CC_JSON="$(find "${OUT_DIR}" -name compile_commands.json -print -quit)"
 [[ -n "${CC_JSON}" ]] || die "compile_commands.json not found; cannot verify flags"
 
 # CMake emits either .command (string) or .arguments (array) depending on generator.
@@ -108,7 +115,7 @@ for cmd in "${CMDS[@]}"; do
     ccxx_total=$((ccxx_total+1))
     if [[ "${has_tune}" -eq 0 ]]; then
       untuned=$((untuned+1))
-      untuned_examples+="$(grep -oE -- '[^ ]+\.(c|cc|cpp|cxx|c\+\+)' <<<"${cmd}" | head -n1) "
+      untuned_examples+="$(grep -oE -- '[^ ]+\.(c|cc|cpp|cxx|c\+\+)' <<<"${cmd}" | head -n1 || true) "
     fi
   fi
 done
@@ -125,12 +132,12 @@ log "GATE PASSED: all ${ccxx_total} C/C++ TUs tuned for ${CPU_MCPU}, no conflict
 
 # --- 4. Harvest artifacts ---------------------------------------------------------
 for lib in ${STATIC_LIBS}; do
-  found="$(find "${OUT_DIR}" -name "${lib}" | head -n1)"
+  found="$(find "${OUT_DIR}" -name "${lib}" -print -quit)"
   [[ -n "${found}" ]] || die "Expected static lib ${lib} not found under OUT_DIR"
   cp -v "${found}" "${DIST}/lib/${lib}"
 done
 
-BINDINGS="$(find "${OUT_DIR}" -name bindings.rs | head -n1)"
+BINDINGS="$(find "${OUT_DIR}" -name bindings.rs -print -quit)"
 [[ -n "${BINDINGS}" ]] || die "generated bindings.rs not found"
 cp -v "${BINDINGS}" "${DIST}/bindings.rs"
 
