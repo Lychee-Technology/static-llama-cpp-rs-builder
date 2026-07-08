@@ -15,7 +15,7 @@ it supports and fails closed on an unexpected value.
 ## Release layout (`dist/`)
 
 ```
-lib/            libllama.a libggml.a libggml-base.a libggml-cpu.a libllama-common.a
+lib/            libllama.a libggml.a libggml-cpu.a libggml-base.a
 include/        llama.h ggml*.h ... (matching the pinned submodule)
 bindings.rs     generated FFI bindings (bindgen, Consts enums, prepend_enum_name=false)
 build-info.json full bill-of-materials + provenance + smoke/benchmark results
@@ -31,25 +31,30 @@ LICENSES/       llama.cpp, ggml, and builder licenses (all MIT)
   **`-O3 -march=armv8.2-a+fp16+dotprod+rcpc`** (ISA, incl. dotprod + LRCPC — also set through ggml's
   `GGML_CPU_ARM_ARCH`) **`-mtune=neoverse-n1`** (scheduling). Built on an N2 runner but
   never with `native`, and never `-mcpu` (it would collide with ggml's own `-march`).
-- Crate: `llama-cpp-sys-2` pinned tag `0.1.151`; features `common` (no `openmp` — ggml uses
-  its built-in threadpool, so there is no libgomp/libomp runtime dependency).
+- Crate: `llama-cpp-sys-2` pinned tag `0.1.151`; **no cargo features** (no `openmp` — ggml
+  uses its built-in threadpool, no libgomp/libomp dep; no `common` — it would add a
+  `llama_rs_*` wrapper archive + bindings decls not needed for direct FFI).
 - Compiler: **Clang 18** (AL2023 `clang18`), GNU libstdc++.
-- Build image: `amazonlinux:2023` (aarch64), **resolved at build time** — not a controlled
-  runtime pin. LTEmbed deploys on AWS-managed AL2023 (Lambda/Fargate) whose patch level AWS
-  controls, so **consumers pin the release artifact checksum, not the build image digest**.
-  The resolved digest, glibc, gcc/g++, runtime packages, and effective CPU flags are all
-  recorded in `build-info.json` (`build_env`, `arch_flag_summary`). CI gates the observed
-  environment against a supported envelope (`EXPECTED_CLANG_MAJOR`, `MIN_GLIBC` in
-  `scripts/config.env`); an optional `AL2023_DIGEST` override forces a reproducible build.
+- Build image: `amazonlinux:2023` (aarch64), **resolved at build time and recorded** — not a
+  reproducibility pin. LTEmbed deploys on AWS-managed AL2023 (Lambda/Fargate) whose patch
+  level AWS controls, so **consumers pin the release artifact checksum, not the build image**.
+  The resolved digest, glibc, compiler, exact package versions, and effective CPU flags are
+  all recorded in `build-info.json` (`build_env`, `arch_flag_summary`) for traceability. CI
+  gates the observed environment against a supported envelope (`EXPECTED_CLANG_MAJOR`,
+  `MIN_GLIBC` in `scripts/config.env`). An optional `AL2023_DIGEST` override pins the base
+  image for a run to aid tracing — **not a full reproducibility guarantee**, since `dnf`
+  still pulls current packages from mutable repos (the resolved versions are recorded).
   libstdc++ is linked **dynamically** by the consumer (see link line); no libgomp.
 
 ## How LTEmbed consumes a release (required steps)
 
-1. **Download** the release tarball + `SHA256SUMS` for the pinned contract version.
+1. **Download** the release tarball, its `<tarball>.sha256`, and `SHA256SUMS`.
 2. **Verify before use (mandatory):**
    ```sh
-   tar xzf static-llama-cpp-<tag>-aarch64-graviton2.tar.gz -C extracted/
-   ( cd extracted && sha256sum -c SHA256SUMS )   # fail the build on mismatch
+   T=static-llama-cpp-<tag>-aarch64-graviton2.tar.gz
+   sha256sum -c "${T}.sha256"           # pin/verify the downloaded artifact first
+   mkdir -p extracted && tar xzf "${T}" -C extracted/
+   ( cd extracted && sha256sum -c SHA256SUMS )   # then verify extracted contents
    ```
    Also assert `jq -r .artifact_contract_version extracted/build-info.json` equals the
    version LTEmbed supports.
@@ -58,7 +63,7 @@ LICENSES/       llama.cpp, ggml, and builder licenses (all MIT)
    dependency order, and the C++/OS deps. Equivalent link line (also in `build-info.json`,
    and the single source of truth is `scripts/config.env`):
    ```
-   -lllama-common -lllama -lggml -lggml-cpu -lggml-base -lstdc++ -lpthread -lm -ldl
+   -lllama -lggml -lggml-cpu -lggml-base -lstdc++ -lpthread -lm -ldl
    ```
 4. **Bind.** Use the shipped `bindings.rs` (the build.rs exports its path as
    `STATIC_LLAMA_BINDINGS`):

@@ -6,7 +6,7 @@
 #
 # Output: $DIST/{lib,include,bindings.rs,build-info.json}
 #
-# Usage: scripts/build.sh   (run inside the pinned AL2023 aarch64 container)
+# Usage: scripts/build.sh   (run inside the AL2023 aarch64 build container)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -76,9 +76,10 @@ export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
 
 # No --target: host == target (native aarch64), so plain CFLAGS is reliably honored by
 # cc/cmake-rs. The triple is still recorded in build-info.json for provenance.
-log "Building llama-cpp-sys-2 (features: ${CRATE_FEATURES})"
+log "Building llama-cpp-sys-2 (features: '${CRATE_FEATURES}')"
 log "  CFLAGS=${CFLAGS}"
-( cd "${SRC}" && cargo build --release -p llama-cpp-sys-2 --features "${CRATE_FEATURES}" )
+# Omit --features entirely when empty (cargo treats `--features ""` inconsistently).
+( cd "${SRC}" && cargo build --release -p llama-cpp-sys-2 ${CRATE_FEATURES:+--features "${CRATE_FEATURES}"} )
 
 # `-print -quit` (not `| head -n1`) to avoid SIGPIPE-failing find under `set -o pipefail`.
 OUT_DIR="$(find "${SRC}/target" -type d -name out -path '*release/build*llama-cpp-sys-2*' -print -quit)"
@@ -103,11 +104,17 @@ while IFS= read -r line; do CMDS+=("${line}"); done \
   < <(jq -r '.[] | (.command // (.arguments | join(" ")))' "${CC_JSON}")
 [[ "${#CMDS[@]}" -gt 0 ]] || die "compile_commands.json had no entries"
 
-ccxx_total=0; dotprod=0; conflicts=0; untuned=0; conflict_examples=""; untuned_examples=""
+ccxx_total=0; dotprod=0; conflicts=0; untuned=0; badopt=0
+conflict_examples=""; untuned_examples=""; badopt_examples=""
 for cmd in "${CMDS[@]}"; do
   # native anywhere is fatal.
   if grep -qE -- '-mcpu=native|-march=native' <<<"${cmd}"; then
     conflicts=$((conflicts+1)); conflict_examples+="[native] "; continue
+  fi
+  # LTO anywhere is fatal: clang -flto emits LLVM bitcode objects, unlinkable as a
+  # native prebuilt .a by the consumer's GNU ld / rustc cc driver.
+  if grep -qE -- '-flto' <<<"${cmd}"; then
+    conflicts=$((conflicts+1)); conflict_examples+="[flto] "; continue
   fi
   # -mcpu should never appear; any -march other than our exact CPU_MARCH is a conflict.
   bad_mcpu="$(grep -oE -- '-mcpu=[^ ]+' <<<"${cmd}" || true)"
@@ -116,28 +123,34 @@ for cmd in "${CMDS[@]}"; do
     conflicts=$((conflicts+1)); conflict_examples+="${bad_mcpu}${bad_march} "
   fi
   grep -q -- "-march=${CPU_MARCH}" <<<"${cmd}" && dotprod=$((dotprod+1)) || true
-  # Every C/C++ TU must carry -mtune (N1 scheduling).
+  # Per C/C++ TU: require -mtune (N1 scheduling) AND effective -O3 (last -O flag == -O3).
   if grep -qiE -- '-c( |$)' <<<"${cmd}" && grep -qiE -- '\.(c|cc|cpp|cxx|c\+\+)( |$|")' <<<"${cmd}"; then
     ccxx_total=$((ccxx_total+1))
+    src="$(grep -oE -- '[^ ]+\.(c|cc|cpp|cxx|c\+\+)' <<<"${cmd}" | head -n1 || true)"
     if ! grep -q -- "-mtune=${CPU_MTUNE}" <<<"${cmd}"; then
-      untuned=$((untuned+1))
-      untuned_examples+="$(grep -oE -- '[^ ]+\.(c|cc|cpp|cxx|c\+\+)' <<<"${cmd}" | head -n1 || true) "
+      untuned=$((untuned+1)); untuned_examples+="${src} "
+    fi
+    # Effective optimization = the LAST -O flag on the command line.
+    last_opt="$(grep -oE -- '-O[0-9sgz]' <<<"${cmd}" | tail -n1 || true)"
+    if [[ "${last_opt}" != "-O3" ]]; then
+      badopt=$((badopt+1)); badopt_examples+="${src}(${last_opt:-none}) "
     fi
   fi
 done
 
-log "Flag gate: ${#CMDS[@]} cmds, ${ccxx_total} C/C++ TUs, ${dotprod} with -march=${CPU_MARCH}, ${conflicts} conflicts, ${untuned} untuned"
-[[ "${conflicts}" -eq 0 ]] || die "GATE: ${conflicts} command(s) with conflicting/native arch flags: ${conflict_examples}"
+log "Flag gate: ${#CMDS[@]} cmds, ${ccxx_total} C/C++ TUs, ${dotprod} with -march=${CPU_MARCH}, ${conflicts} conflicts, ${untuned} untuned, ${badopt} not -O3"
+[[ "${conflicts}" -eq 0 ]] || die "GATE: ${conflicts} command(s) with native/flto/conflicting flags: ${conflict_examples}"
 [[ "${ccxx_total}" -gt 0 ]] || die "GATE: no C/C++ compile commands seen; cannot verify tuning"
 [[ "${untuned}" -eq 0 ]] || die "GATE: ${untuned} C/C++ TU(s) missing -mtune=${CPU_MTUNE}: ${untuned_examples}"
+[[ "${badopt}" -eq 0 ]] || die "GATE: ${badopt} C/C++ TU(s) not built at effective -O3: ${badopt_examples}"
 [[ "${dotprod}" -gt 0 ]] || die "GATE: -march=${CPU_MARCH} never applied — CPU backend not dotprod-tuned"
-EFFECTIVE_FLAGS="-march=${CPU_MARCH} -mtune=${CPU_MTUNE}"
+EFFECTIVE_FLAGS="-O3 -march=${CPU_MARCH} -mtune=${CPU_MTUNE}"
 ARCH_SUMMARY="$(jq -n --argjson cmds "${#CMDS[@]}" --argjson ccxx "${ccxx_total}" \
   --argjson dotprod "${dotprod}" --argjson conflicts "${conflicts}" --argjson untuned "${untuned}" \
-  --arg march "${CPU_MARCH}" --arg mtune "${CPU_MTUNE}" \
+  --argjson badopt "${badopt}" --arg march "${CPU_MARCH}" --arg mtune "${CPU_MTUNE}" \
   '{compile_commands:$cmds, ccxx_tus:$ccxx, march:$march, mtune:$mtune,
-    dotprod_march_tus:$dotprod, conflicts:$conflicts, untuned:$untuned}')"
-log "GATE PASSED: ${ccxx_total} C/C++ TUs -mtune=${CPU_MTUNE}, ${dotprod} dotprod-tuned, no conflicts"
+    dotprod_march_tus:$dotprod, conflicts:$conflicts, untuned:$untuned, not_o3:$badopt}')"
+log "GATE PASSED: ${ccxx_total} C/C++ TUs -O3 -mtune=${CPU_MTUNE}, ${dotprod} dotprod-tuned, no conflicts/flto"
 
 # --- 4. Harvest artifacts ---------------------------------------------------------
 for lib in ${STATIC_LIBS}; do

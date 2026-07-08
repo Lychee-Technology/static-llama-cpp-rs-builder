@@ -3,8 +3,9 @@
 # Base: Amazon Linux 2023 (aarch64) — the compiler baseline (Clang 18, GNU libstdc++,
 # glibc 2.34). This is resolved-and-recorded build provenance, NOT a runtime pin (LTEmbed
 # runs on AWS-managed AL2023). CI resolves the current digest, records it in build-info.json,
-# and gates the environment envelope (EXPECTED_CLANG_MAJOR / MIN_GLIBC). For a reproducible
-# build against a specific patch level, override:
+# and gates the environment envelope (EXPECTED_CLANG_MAJOR / MIN_GLIBC). To pin the base image
+# for a run (aids tracing; NOT full reproducibility — dnf still pulls current packages),
+# override:
 #   docker build --build-arg AL2023_DIGEST=2023@sha256:<...> .
 # The default is the plain tag.
 ARG AL2023_DIGEST=2023

@@ -28,7 +28,7 @@ fn main() {
     // This order is the canonical one in scripts/config.env (STATIC_LIBS) and equals
     // build-info.json's `link_line`; keep all three in sync. If you ever hit unresolved
     // symbols, the archives are safe to wrap in a linker group.
-    for lib in ["llama-common", "llama", "ggml", "ggml-cpu", "ggml-base"] {
+    for lib in ["llama", "ggml", "ggml-cpu", "ggml-base"] {
         println!("cargo:rustc-link-lib=static={lib}");
     }
 

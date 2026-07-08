@@ -39,8 +39,8 @@ patch_ggml_arm_arch "${SRC_BUILD}/llama-cpp-sys-2/build.rs" \
 export CFLAGS="${CFLAGS_TUNE} ${CFLAGS:-}"
 export CXXFLAGS="${CFLAGS_TUNE} ${CXXFLAGS:-}"
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
-log "building from-source baseline (features: ${CRATE_FEATURES}, CFLAGS=${CFLAGS})"
-( cd "${SRC_BUILD}" && cargo build --release -p llama-cpp-sys-2 --features "${CRATE_FEATURES}" )
+log "building from-source baseline (features: '${CRATE_FEATURES}', CFLAGS=${CFLAGS})"
+( cd "${SRC_BUILD}" && cargo build --release -p llama-cpp-sys-2 ${CRATE_FEATURES:+--features "${CRATE_FEATURES}"} )
 
 # `-print -quit` (not `| head -n1`) to avoid SIGPIPE-failing find under `set -o pipefail`.
 OUT_DIR="$(find "${SRC_BUILD}/target" -type d -name out -path '*release/build*llama-cpp-sys-2*' -print -quit)"

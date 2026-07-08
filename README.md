@@ -6,7 +6,7 @@ link directly (no per-build llama.cpp recompile).
 
 ## What a release contains
 
-Static `.a` (`libllama`, `libggml`, `libggml-base`, `libggml-cpu`, `libllama-common`),
+Static `.a` (`libllama`, `libggml`, `libggml-cpu`, `libggml-base`),
 generated `bindings.rs`, headers, `build-info.json`, `SHA256SUMS`, licenses, and a drop-in
 `consume.build.rs`. See [CONTRACT.md](CONTRACT.md) for the full contract and consumption steps.
 
@@ -22,13 +22,14 @@ Single source of truth: [`scripts/config.env`](scripts/config.env).
 | CMake | `3.29.6` (`Dockerfile`) |
 | Compiler | Clang 18 (AL2023 `clang18`), GNU libstdc++ |
 | CPU profile | `-O3 -march=armv8.2-a+fp16+dotprod+rcpc -mtune=neoverse-n1` (no `native`/`-mcpu`/`-flto`) |
-| Features | `common` (no OpenMP — ggml threadpool, so no libgomp/libomp dep) |
+| Features | none (no OpenMP → ggml threadpool, no libgomp; no `common` → no extra wrapper archive) |
 
 **Build image (not a pin):** `amazonlinux:2023` is **resolved at build time and recorded** in
-`build-info.json` (`build_env`), not pinned as a product input — LTEmbed deploys on AWS-managed
-AL2023 (Lambda/Fargate). Consumers pin the **release artifact checksum**, not the build image.
-CI gates the environment envelope (`EXPECTED_CLANG_MAJOR`, `MIN_GLIBC`); set `AL2023_DIGEST` to
-force a reproducible build against a specific patch level.
+`build-info.json` (`build_env`) for traceability, not pinned as a product input — LTEmbed deploys
+on AWS-managed AL2023 (Lambda/Fargate). Consumers pin the **release artifact checksum**, not the
+build image. CI gates the environment envelope (`EXPECTED_CLANG_MAJOR`, `MIN_GLIBC`). Setting
+`AL2023_DIGEST` pins the base image for a run to aid tracing — it is **not** full reproducibility
+(`dnf` still pulls current packages from mutable repos; resolved versions are recorded).
 
 ## How it works
 
@@ -47,8 +48,8 @@ runner inside a resolved-and-recorded AL2023 container and publishes a GitHub Re
 ## Local run (on an aarch64 Linux host / container)
 
 ```sh
-# Default resolves amazonlinux:2023 latest. For a reproducible build against a specific
-# patch level, add: --build-arg AL2023_DIGEST=2023@sha256:<digest>
+# Default resolves amazonlinux:2023 latest. To pin the base image for a run (tracing;
+# not full reproducibility), add: --build-arg AL2023_DIGEST=2023@sha256:<digest>
 docker build -t static-llama-builder .
 docker run --rm -v "$PWD:/work" -w /work \
   -e SMOKE_MODEL_URL=<url> -e SMOKE_MODEL_SHA256=<pinned-sha> static-llama-builder bash -c '
