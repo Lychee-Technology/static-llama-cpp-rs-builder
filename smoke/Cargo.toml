@@ -1,0 +1,13 @@
+[package]
+name = "smoke"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Links the prebuilt static archives via ../scripts/consume.build.rs (the exact same
+# build.rs shipped to consumers) and runs a real embedding/context-init path.
+[[bin]]
+name = "smoke"
+path = "src/main.rs"
+
+[workspace]
