@@ -14,7 +14,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/config.env"
 
 DIST="${DIST:-${ROOT}/dist}"
-SRC="${SRC:-${ROOT}/.build/llama-cpp-rs}"
 RESULTS="${RESULTS:-${ROOT}/.build/results}"
 SRC_DIST="${ROOT}/.build/source-dist"
 ITERS="${BENCH_ITERS:-200}"
@@ -24,11 +23,25 @@ THRESHOLD_PCT="${BENCH_REGRESS_THRESHOLD_PCT:-3}"   # prebuilt must be >= source
 mkdir -p "${RESULTS}" "${SRC_DIST}/lib"
 log() { printf '\033[1;34m[bench]\033[0m %s\n' "$*"; }
 
-# --- Stage the from-source crate build as an independent "source" link target -----
-# It shares provenance with dist/ by design; parity here validates packaging integrity
-# and link-order performance, and records an absolute per-release number.
-OUT_DIR="$(find "${SRC}/target" -type d -name out -path '*release/build*llama-cpp-sys-2*' \
+# --- Produce an INDEPENDENT from-source build (fresh clone + compile, same flags) --
+# "prebuilt vs local from-source" means exactly that: we do NOT reuse build.sh's output.
+# A separate clone + target dir forces a real recompile of llama.cpp; comparing it to the
+# packaged dist/ validates that packaging/linking loses no performance (and records an
+# absolute per-release number).
+SRC_BUILD="${ROOT}/.build/source-build"
+if [[ ! -d "${SRC_BUILD}/.git" ]]; then
+  log "fresh clone for from-source baseline: ${CRATE_REPO} @ ${CRATE_TAG}"
+  git clone --depth 1 --branch "${CRATE_TAG}" --recursive "${CRATE_REPO}" "${SRC_BUILD}"
+fi
+export CFLAGS="${CFLAGS_TUNE} ${CFLAGS:-}"
+export CXXFLAGS="${CFLAGS_TUNE} ${CXXFLAGS:-}"
+export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
+log "building from-source baseline (features: ${CRATE_FEATURES}, CFLAGS=${CFLAGS})"
+( cd "${SRC_BUILD}" && cargo build --release -p llama-cpp-sys-2 --features "${CRATE_FEATURES}" )
+
+OUT_DIR="$(find "${SRC_BUILD}/target" -type d -name out -path '*release/build*llama-cpp-sys-2*' \
              | head -n1)"
+[[ -n "${OUT_DIR}" ]] || { echo "[bench] from-source OUT_DIR not found" >&2; exit 1; }
 for lib in ${STATIC_LIBS}; do
   cp "$(find "${OUT_DIR}" -name "${lib}" | head -n1)" "${SRC_DIST}/lib/${lib}"
 done

@@ -29,8 +29,9 @@ LICENSES/       llama.cpp, ggml, and builder licenses (all MIT)
 - Target: `aarch64-unknown-linux-gnu`, tuned **`-mcpu=neoverse-n1`** (Graviton2 / N1;
   gives `+dotprod`). Built on an N2 runner but never with `-mcpu=native`.
 - Crate: `llama-cpp-sys-2` pinned tag `0.1.151`; features `common,openmp`.
-- Runtime base: Amazon Linux 2023 (glibc 2.34, gcc 11); libstdc++/libgomp linked
-  **dynamically** by the consumer (see link line).
+- Runtime base: Amazon Linux 2023 (glibc 2.34, gcc 11), pinned **by digest** in
+  `scripts/config.env` (`AL2023_DIGEST`) and recorded in `build-info.json` (`compiler.image`);
+  libstdc++/libgomp linked **dynamically** by the consumer (see link line).
 
 ## How LTEmbed consumes a release (required steps)
 
@@ -44,9 +45,10 @@ LICENSES/       llama.cpp, ggml, and builder licenses (all MIT)
    version LTEmbed supports.
 3. **Link.** Copy `consume.build.rs` to your crate's `build.rs` and set
    `STATIC_LLAMA_DIR=/abs/path/to/extracted`. It emits the search path, the static libs in
-   dependency order, and the C++/OS deps. Equivalent link line (also in `build-info.json`):
+   dependency order, and the C++/OS deps. Equivalent link line (also in `build-info.json`,
+   and the single source of truth is `scripts/config.env`):
    ```
-   -lllama -lggml -lggml-base -lggml-cpu -lllama-common -lstdc++ -lgomp -lpthread -lm -ldl
+   -lllama-common -lllama -lggml -lggml-cpu -lggml-base -lstdc++ -lgomp -lpthread -lm -ldl
    ```
 4. **Bind.** Use the shipped `bindings.rs` (the build.rs exports its path as
    `STATIC_LLAMA_BINDINGS`):

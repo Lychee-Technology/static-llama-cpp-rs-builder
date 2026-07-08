@@ -59,23 +59,42 @@ OUT_DIR="$(find "${SRC}/target" -type d -name out -path '*release/build*llama-cp
 [[ -n "${OUT_DIR}" ]] || die "Could not locate llama-cpp-sys-2 OUT_DIR"
 log "OUT_DIR=${OUT_DIR}"
 
-# --- 3. Flag-verification gate ----------------------------------------------------
+# --- 3. Flag-verification gate (PER compile command, not the union) ---------------
+# A union check could pass if -mcpu=neoverse-n1 appears on one TU while another TU is
+# compiled with a different/native -mcpu. So we inspect EVERY C/C++ compile command:
+#   * any command carrying an arch flag (-mcpu/-march/-mtune) must be exactly our tune,
+#   * no command may use native or a conflicting -mcpu/-march,
+#   * at least one command must actually carry -mcpu=neoverse-n1 (proves it took effect).
 CC_JSON="$(find "${OUT_DIR}" -name compile_commands.json | head -n1)"
 [[ -n "${CC_JSON}" ]] || die "compile_commands.json not found; cannot verify flags"
 
-EFFECTIVE_FLAGS="$(jq -r '.[].command' "${CC_JSON}" \
-  | grep -Eo -- '-mcpu=[^ ]+|-march=[^ ]+|-mtune=[^ ]+' | sort -u | tr '\n' ' ')"
-log "Effective arch flags observed: ${EFFECTIVE_FLAGS:-<none>}"
+# CMake emits either .command (string) or .arguments (array) depending on generator.
+# (while-read, not mapfile, to stay portable to bash 3.2.)
+CMDS=()
+while IFS= read -r line; do CMDS+=("${line}"); done \
+  < <(jq -r '.[] | (.command // (.arguments | join(" ")))' "${CC_JSON}")
+[[ "${#CMDS[@]}" -gt 0 ]] || die "compile_commands.json had no entries"
 
-grep -q -- "-mcpu=${CPU_MCPU}" <<<"${EFFECTIVE_FLAGS}" \
-  || die "GATE: expected -mcpu=${CPU_MCPU} not found on compile commands"
-if grep -q -- '-mcpu=native\|-march=native' <<<"${EFFECTIVE_FLAGS}"; then
-  die "GATE: native codegen detected — would emit N1-illegal instructions on Graviton2"
-fi
-if grep -qE -- '-march=armv8[^ ]*' <<<"${EFFECTIVE_FLAGS}"; then
-  die "GATE: a conflicting -march was injected alongside -mcpu; resolve before shipping"
-fi
-log "GATE PASSED: tuned exclusively for ${CPU_MCPU}"
+tuned=0; conflicts=0; conflict_examples=""
+for cmd in "${CMDS[@]}"; do
+  # native anywhere is fatal (would emit N1-illegal insns on Graviton2).
+  if grep -qE -- '-mcpu=native|-march=native' <<<"${cmd}"; then
+    conflicts=$((conflicts+1)); conflict_examples+="[native] "; continue
+  fi
+  # any -mcpu other than ours, or any -march at all, is a conflict.
+  bad_mcpu="$(grep -oE -- '-mcpu=[^ ]+' <<<"${cmd}" | grep -v -- "-mcpu=${CPU_MCPU}" || true)"
+  any_march="$(grep -oE -- '-march=[^ ]+' <<<"${cmd}" || true)"
+  if [[ -n "${bad_mcpu}" || -n "${any_march}" ]]; then
+    conflicts=$((conflicts+1)); conflict_examples+="${bad_mcpu}${any_march} "
+  fi
+  grep -q -- "-mcpu=${CPU_MCPU}" <<<"${cmd}" && tuned=$((tuned+1)) || true
+done
+
+log "Flag gate: ${#CMDS[@]} compile commands, ${tuned} carry -mcpu=${CPU_MCPU}, ${conflicts} conflicts"
+[[ "${conflicts}" -eq 0 ]] || die "GATE: ${conflicts} command(s) with conflicting/native arch flags: ${conflict_examples}"
+[[ "${tuned}" -gt 0 ]]     || die "GATE: -mcpu=${CPU_MCPU} never took effect on any compile command"
+EFFECTIVE_FLAGS="-mcpu=${CPU_MCPU}"
+log "GATE PASSED: every compile command is tuned exclusively for ${CPU_MCPU}"
 
 # --- 4. Harvest artifacts ---------------------------------------------------------
 for lib in ${STATIC_LIBS}; do

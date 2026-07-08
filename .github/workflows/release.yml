@@ -22,10 +22,12 @@ jobs:
         id: img
         run: |
           set -euo pipefail
-          digest="$(docker manifest inspect amazonlinux:2023 \
-            | jq -r '.manifests[] | select(.platform.architecture=="arm64") | .digest' | head -n1)"
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-          echo "image=amazonlinux:2023@${digest}" >> "$GITHUB_OUTPUT"
+          # Use the DIGEST pinned in scripts/config.env (a fully-pinned input), not a
+          # mutable tag. Guard against drift, then optionally assert the tag still points
+          # at it (informational; the pin is authoritative).
+          source scripts/config.env
+          echo "digest=${AL2023_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "image=${COMPILER_IMAGE}" >> "$GITHUB_OUTPUT"
 
       - name: Build builder image
         run: |

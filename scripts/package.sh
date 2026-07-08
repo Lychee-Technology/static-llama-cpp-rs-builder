@@ -24,6 +24,16 @@ smoke_json="null"; bench_json="null"
 [[ -f "${RESULTS}/smoke.json" ]] && smoke_json="$(cat "${RESULTS}/smoke.json")"
 [[ -f "${RESULTS}/bench.json" ]] && bench_json="$(cat "${RESULTS}/bench.json")"
 
+# The contract says a release carries PASSING smoke + benchmark provenance. Enforce it
+# here so we can't ship a release with missing/failed results. Set ALLOW_MISSING_RESULTS=1
+# only for local dev packaging.
+if [[ "${ALLOW_MISSING_RESULTS:-0}" != "1" ]]; then
+  [[ "$(jq -r '.passed // false' <<<"${smoke_json}")" == "true" ]] \
+    || { echo "package: smoke result missing or not passed (set ALLOW_MISSING_RESULTS=1 for dev)" >&2; exit 1; }
+  [[ "$(jq -r '.passed // false' <<<"${bench_json}")" == "true" ]] \
+    || { echo "package: benchmark result missing or not passed (set ALLOW_MISSING_RESULTS=1 for dev)" >&2; exit 1; }
+fi
+
 tmp="$(mktemp)"
 jq --argjson smoke "${smoke_json}" --argjson bench "${bench_json}" \
    '.smoke = $smoke | .benchmark = $bench' \
