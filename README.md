@@ -20,13 +20,14 @@ Single source of truth: [`scripts/config.env`](scripts/config.env).
 | llama.cpp submodule | `9e3b928…` (verified at build time) |
 | Rust | `1.85.0` (`rust-toolchain.toml`) |
 | CMake | `3.29.6` (`Dockerfile`) |
+| Compiler | Clang 18 (AL2023 `clang18`), GNU libstdc++ |
 | CPU profile | `-march=armv8.2-a+fp16+dotprod -mtune=neoverse-n1` (never `native`/`-mcpu`) |
-| Features | `common,openmp` |
+| Features | `common` (no OpenMP — ggml threadpool, so no libgomp/libomp dep) |
 
 **Build image (not a pin):** `amazonlinux:2023` is **resolved at build time and recorded** in
 `build-info.json` (`build_env`), not pinned as a product input — LTEmbed deploys on AWS-managed
 AL2023 (Lambda/Fargate). Consumers pin the **release artifact checksum**, not the build image.
-CI gates the environment envelope (`EXPECTED_GCC_MAJOR`, `MIN_GLIBC`); set `AL2023_DIGEST` to
+CI gates the environment envelope (`EXPECTED_CLANG_MAJOR`, `MIN_GLIBC`); set `AL2023_DIGEST` to
 force a reproducible build against a specific patch level.
 
 ## How it works

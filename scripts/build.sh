@@ -24,18 +24,18 @@ mkdir -p "${WORK}" "${DIST}/lib" "${DIST}/include"
 
 # --- 0. Build-environment envelope gate -------------------------------------------
 # The AL2023 base is resolved (not a controlled runtime pin), so guard against drift:
-# a different gcc major or an older glibc could change the C++ ABI / raise the runtime
+# a different clang major or an older glibc could change codegen/ABI or raise the runtime
 # floor. Fail fast if the observed toolchain leaves the supported envelope.
-# Capture-then-parse (NOT `... | head -n1`): under `set -o pipefail`, head closing the
-# pipe early makes the upstream tool exit via SIGPIPE, which would spuriously fail the
-# command and append the `|| echo 0` fallback to the captured value.
-gcc_raw="$(${CC:-cc} -dumpversion 2>/dev/null || true)"
-GCC_MAJOR="${gcc_raw%%.*}"; GCC_MAJOR="${GCC_MAJOR:-0}"
+# Capture-then-parse full --version output (NOT `... | head -n1`): under `set -o pipefail`,
+# head closing the pipe early makes the tool exit via SIGPIPE and spuriously fail. Note we
+# parse `--version` (not -dumpversion — clang prints gcc-compat "4.2.1" for that).
+cc_raw="$(${CC:-cc} --version 2>/dev/null || true)"
+if [[ "${cc_raw}" =~ version[[:space:]]+([0-9]+) ]]; then CC_MAJOR="${BASH_REMATCH[1]}"; else CC_MAJOR="0"; fi
 glibc_raw="$(ldd --version 2>/dev/null || true)"
 if [[ "${glibc_raw}" =~ ([0-9]+\.[0-9]+) ]]; then GLIBC_VER="${BASH_REMATCH[1]}"; else GLIBC_VER="0"; fi
-log "Env: gcc major=${GCC_MAJOR} (expect ${EXPECTED_GCC_MAJOR}), glibc=${GLIBC_VER} (min ${MIN_GLIBC})"
-[[ "${GCC_MAJOR}" == "${EXPECTED_GCC_MAJOR}" ]] \
-  || die "ENVELOPE: gcc major ${GCC_MAJOR} != expected ${EXPECTED_GCC_MAJOR} (ABI drift risk)"
+log "Env: ${CC:-cc} major=${CC_MAJOR} (expect ${EXPECTED_CLANG_MAJOR}), glibc=${GLIBC_VER} (min ${MIN_GLIBC})"
+[[ "${CC_MAJOR}" == "${EXPECTED_CLANG_MAJOR}" ]] \
+  || die "ENVELOPE: clang major ${CC_MAJOR} != expected ${EXPECTED_CLANG_MAJOR} (codegen/ABI drift risk)"
 # glibc must be >= MIN_GLIBC — integer major/minor compare (whitespace-immune).
 gmaj="${GLIBC_VER%%.*}"; gmin="${GLIBC_VER#*.}"; gmin="${gmin%%.*}"
 mmaj="${MIN_GLIBC%%.*}"; mmin="${MIN_GLIBC#*.}"; mmin="${mmin%%.*}"
@@ -172,7 +172,7 @@ jq -n \
   --arg image         "${COMPILER_IMAGE:-amazonlinux:2023 (unrecorded)}" \
   --arg cc            "$(${CC:-cc} --version | head -n1)" \
   --arg cxx           "$(${CXX:-c++} --version | head -n1)" \
-  --arg pkgs          "$(command -v rpm >/dev/null && rpm -q glibc gcc gcc-c++ libstdc++ libgomp 2>/dev/null | tr '\n' ';' || echo 'rpm-unavailable')" \
+  --arg pkgs          "$(command -v rpm >/dev/null && rpm -q glibc libstdc++ gcc clang18 llvm18-libs 2>/dev/null | tr '\n' ';' || echo 'rpm-unavailable')" \
   --arg triple        "${TARGET_TRIPLE}" \
   --arg cpu           "${CPU_MTUNE}" \
   --arg flags         "${EFFECTIVE_FLAGS}" \

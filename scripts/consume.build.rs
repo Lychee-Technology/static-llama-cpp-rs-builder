@@ -33,8 +33,8 @@ fn main() {
     }
 
     // C++ runtime + OS deps (== config.env SYSTEM_LINK_LIBS, == build-info.json link_line
-    // tail). Dynamic from the base image.
-    for lib in ["stdc++", "gomp", "pthread", "m", "dl"] {
+    // tail). Dynamic from the base image. No -lgomp: OpenMP is disabled (ggml threadpool).
+    for lib in ["stdc++", "pthread", "m", "dl"] {
         println!("cargo:rustc-link-lib=dylib={lib}");
     }
 
