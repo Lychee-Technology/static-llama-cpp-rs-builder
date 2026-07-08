@@ -29,9 +29,14 @@ LICENSES/       llama.cpp, ggml, and builder licenses (all MIT)
 - Target: `aarch64-unknown-linux-gnu`, tuned **`-mcpu=neoverse-n1`** (Graviton2 / N1;
   gives `+dotprod`). Built on an N2 runner but never with `-mcpu=native`.
 - Crate: `llama-cpp-sys-2` pinned tag `0.1.151`; features `common,openmp`.
-- Runtime base: Amazon Linux 2023 (glibc 2.34, gcc 11), pinned **by digest** in
-  `scripts/config.env` (`AL2023_DIGEST`) and recorded in `build-info.json` (`compiler.image`);
-  libstdc++/libgomp linked **dynamically** by the consumer (see link line).
+- Build image: `amazonlinux:2023` (aarch64), **resolved at build time** — not a controlled
+  runtime pin. LTEmbed deploys on AWS-managed AL2023 (Lambda/Fargate) whose patch level AWS
+  controls, so **consumers pin the release artifact checksum, not the build image digest**.
+  The resolved digest, glibc, gcc/g++, runtime packages, and effective CPU flags are all
+  recorded in `build-info.json` (`build_env`, `arch_flag_summary`). CI gates the observed
+  environment against a supported envelope (`EXPECTED_GCC_MAJOR`, `MIN_GLIBC` in
+  `scripts/config.env`); an optional `AL2023_DIGEST` override forces a reproducible build.
+  libstdc++/libgomp are linked **dynamically** by the consumer (see link line).
 
 ## How LTEmbed consumes a release (required steps)
 

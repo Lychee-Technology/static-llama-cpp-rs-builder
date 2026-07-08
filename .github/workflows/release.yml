@@ -22,12 +22,20 @@ jobs:
         id: img
         run: |
           set -euo pipefail
-          # Use the DIGEST pinned in scripts/config.env (a fully-pinned input), not a
-          # mutable tag. Guard against drift, then optionally assert the tag still points
-          # at it (informational; the pin is authoritative).
+          # AL2023 is resolved-and-recorded provenance, not a runtime pin. Use the optional
+          # AL2023_DIGEST override if set (reproducible build); otherwise resolve the current
+          # index digest for the tag. Either way it is recorded in build-info.json, and the
+          # build-env envelope (gcc major / glibc floor) is gated in build.sh.
           source scripts/config.env
-          echo "digest=${AL2023_DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "image=${COMPILER_IMAGE}" >> "$GITHUB_OUTPUT"
+          digest="${AL2023_DIGEST:-}"
+          if [[ -z "${digest}" ]]; then
+            digest="$(docker manifest inspect amazonlinux:2023 --verbose \
+              | jq -r 'if type=="array" then .[0] else . end | .Descriptor.digest' 2>/dev/null || true)"
+            [[ -n "${digest}" && "${digest}" != "null" ]] \
+              || digest="$(docker buildx imagetools inspect amazonlinux:2023 --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "image=amazonlinux:2023@${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Build builder image
         run: |

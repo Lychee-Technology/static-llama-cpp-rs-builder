@@ -20,9 +20,14 @@ Single source of truth: [`scripts/config.env`](scripts/config.env).
 | llama.cpp submodule | `9e3b928…` (verified at build time) |
 | Rust | `1.85.0` (`rust-toolchain.toml`) |
 | CMake | `3.29.6` (`Dockerfile`) |
-| Base image | `amazonlinux:2023` pinned by digest (`config.env` `AL2023_DIGEST`) |
 | CPU profile | `-mcpu=neoverse-n1` (never `native`) |
 | Features | `common,openmp` |
+
+**Build image (not a pin):** `amazonlinux:2023` is **resolved at build time and recorded** in
+`build-info.json` (`build_env`), not pinned as a product input — LTEmbed deploys on AWS-managed
+AL2023 (Lambda/Fargate). Consumers pin the **release artifact checksum**, not the build image.
+CI gates the environment envelope (`EXPECTED_GCC_MAJOR`, `MIN_GLIBC`); set `AL2023_DIGEST` to
+force a reproducible build against a specific patch level.
 
 ## How it works
 
@@ -36,13 +41,14 @@ Single source of truth: [`scripts/config.env`](scripts/config.env).
 4. `scripts/package.sh` — merges results, gathers licenses, writes `SHA256SUMS`.
 
 CI (`.github/workflows/release.yml`) runs all of this on a GitHub-hosted **ARM64 (N2)**
-runner inside the pinned AL2023 container and publishes a GitHub Release on `v*` tags.
+runner inside a resolved-and-recorded AL2023 container and publishes a GitHub Release on `v*` tags.
 
 ## Local run (on an aarch64 Linux host / container)
 
 ```sh
-source scripts/config.env   # provides AL2023_DIGEST
-docker build --build-arg AL2023_DIGEST="2023@${AL2023_DIGEST}" -t static-llama-builder .
+# Default resolves amazonlinux:2023 latest. For a reproducible build against a specific
+# patch level, add: --build-arg AL2023_DIGEST=2023@sha256:<digest>
+docker build -t static-llama-builder .
 docker run --rm -v "$PWD:/work" -w /work \
   -e SMOKE_MODEL_URL=<url> -e SMOKE_MODEL_SHA256=<pinned-sha> static-llama-builder bash -c '
     git config --global --add safe.directory "*"

@@ -1,14 +1,11 @@
 # Build image for Graviton2-optimized static llama-cpp-rs artifacts.
 #
-# Base: Amazon Linux 2023 (aarch64) — fixes the runtime baseline LTEmbed deploys on
-# (glibc 2.34, gcc 11). Pin BY DIGEST, not just the tag, so the toolchain is reproducible.
-# Resolve the current digest with:
-#     docker manifest inspect amazonlinux:2023 | \
-#       jq -r '.manifests[] | select(.platform.architecture=="arm64") | .digest'
-# then pass it as: docker build --build-arg AL2023_DIGEST=sha256:<...> .
-#
-# The default below is the tag; CI MUST override AL2023_DIGEST and the resolved
-# value is recorded verbatim in build-info.json (compiler.image).
+# Base: Amazon Linux 2023 (aarch64) — the compiler baseline (glibc 2.34, gcc 11). This is
+# resolved-and-recorded build provenance, NOT a runtime pin (LTEmbed runs on AWS-managed
+# AL2023). CI resolves the current digest, records it in build-info.json, and gates the
+# environment envelope (EXPECTED_GCC_MAJOR / MIN_GLIBC). For a reproducible build against a
+# specific patch level, override: docker build --build-arg AL2023_DIGEST=2023@sha256:<...> .
+# The default is the plain tag.
 ARG AL2023_DIGEST=2023
 FROM amazonlinux:${AL2023_DIGEST}
 

@@ -22,6 +22,20 @@ die() { printf '\033[1;31m[build:ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
 rm -rf "${DIST}"
 mkdir -p "${WORK}" "${DIST}/lib" "${DIST}/include"
 
+# --- 0. Build-environment envelope gate -------------------------------------------
+# The AL2023 base is resolved (not a controlled runtime pin), so guard against drift:
+# a different gcc major or an older glibc could change the C++ ABI / raise the runtime
+# floor. Fail fast if the observed toolchain leaves the supported envelope.
+GCC_MAJOR="$(${CC:-cc} -dumpversion 2>/dev/null | cut -d. -f1 || echo 0)"
+GLIBC_VER="$(ldd --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1 || echo 0)"
+log "Env: gcc major=${GCC_MAJOR} (expect ${EXPECTED_GCC_MAJOR}), glibc=${GLIBC_VER} (min ${MIN_GLIBC})"
+[[ "${GCC_MAJOR}" == "${EXPECTED_GCC_MAJOR}" ]] \
+  || die "ENVELOPE: gcc major ${GCC_MAJOR} != expected ${EXPECTED_GCC_MAJOR} (ABI drift risk)"
+# glibc must be >= MIN_GLIBC (string-sorted numeric compare via sort -V).
+if [[ "$(printf '%s\n%s\n' "${MIN_GLIBC}" "${GLIBC_VER}" | sort -V | head -n1)" != "${MIN_GLIBC}" ]]; then
+  die "ENVELOPE: glibc ${GLIBC_VER} is below the supported floor ${MIN_GLIBC}"
+fi
+
 # --- 1. Fetch the pinned crate (with the vendored llama.cpp submodule) ------------
 if [[ ! -d "${SRC}/.git" ]]; then
   log "Cloning ${CRATE_REPO} @ ${CRATE_TAG} (recursive)"
@@ -59,12 +73,12 @@ OUT_DIR="$(find "${SRC}/target" -type d -name out -path '*release/build*llama-cp
 [[ -n "${OUT_DIR}" ]] || die "Could not locate llama-cpp-sys-2 OUT_DIR"
 log "OUT_DIR=${OUT_DIR}"
 
-# --- 3. Flag-verification gate (PER compile command, not the union) ---------------
-# A union check could pass if -mcpu=neoverse-n1 appears on one TU while another TU is
-# compiled with a different/native -mcpu. So we inspect EVERY C/C++ compile command:
-#   * any command carrying an arch flag (-mcpu/-march/-mtune) must be exactly our tune,
-#   * no command may use native or a conflicting -mcpu/-march,
-#   * at least one command must actually carry -mcpu=neoverse-n1 (proves it took effect).
+# --- 3. Flag-verification gate (PER compile command) ------------------------------
+# The contract claims the archives are Neoverse-N1 tuned, so we prove it per translation
+# unit rather than on the union of flags. For EVERY compile command:
+#   * no command may use native or a conflicting -mcpu/-march (fatal), and
+#   * every command that compiles a C/C++ source (.c/.cc/.cpp/.cxx) MUST carry
+#     -mcpu=neoverse-n1 (an untuned C/C++ TU fails the gate).
 CC_JSON="$(find "${OUT_DIR}" -name compile_commands.json | head -n1)"
 [[ -n "${CC_JSON}" ]] || die "compile_commands.json not found; cannot verify flags"
 
@@ -75,7 +89,7 @@ while IFS= read -r line; do CMDS+=("${line}"); done \
   < <(jq -r '.[] | (.command // (.arguments | join(" ")))' "${CC_JSON}")
 [[ "${#CMDS[@]}" -gt 0 ]] || die "compile_commands.json had no entries"
 
-tuned=0; conflicts=0; conflict_examples=""
+ccxx_total=0; tuned=0; conflicts=0; untuned=0; conflict_examples=""; untuned_examples=""
 for cmd in "${CMDS[@]}"; do
   # native anywhere is fatal (would emit N1-illegal insns on Graviton2).
   if grep -qE -- '-mcpu=native|-march=native' <<<"${cmd}"; then
@@ -87,14 +101,27 @@ for cmd in "${CMDS[@]}"; do
   if [[ -n "${bad_mcpu}" || -n "${any_march}" ]]; then
     conflicts=$((conflicts+1)); conflict_examples+="${bad_mcpu}${any_march} "
   fi
-  grep -q -- "-mcpu=${CPU_MCPU}" <<<"${cmd}" && tuned=$((tuned+1)) || true
+  has_tune=0; grep -q -- "-mcpu=${CPU_MCPU}" <<<"${cmd}" && has_tune=1
+  [[ "${has_tune}" -eq 1 ]] && tuned=$((tuned+1))
+  # Is this a C/C++ compilation (vs link/asm/other)? Require our tuning on it.
+  if grep -qiE -- '-c( |$)' <<<"${cmd}" && grep -qiE -- '\.(c|cc|cpp|cxx|c\+\+)( |$|")' <<<"${cmd}"; then
+    ccxx_total=$((ccxx_total+1))
+    if [[ "${has_tune}" -eq 0 ]]; then
+      untuned=$((untuned+1))
+      untuned_examples+="$(grep -oE -- '[^ ]+\.(c|cc|cpp|cxx|c\+\+)' <<<"${cmd}" | head -n1) "
+    fi
+  fi
 done
 
-log "Flag gate: ${#CMDS[@]} compile commands, ${tuned} carry -mcpu=${CPU_MCPU}, ${conflicts} conflicts"
+log "Flag gate: ${#CMDS[@]} cmds, ${ccxx_total} C/C++ TUs, ${tuned} tuned, ${conflicts} conflicts, ${untuned} untuned"
 [[ "${conflicts}" -eq 0 ]] || die "GATE: ${conflicts} command(s) with conflicting/native arch flags: ${conflict_examples}"
-[[ "${tuned}" -gt 0 ]]     || die "GATE: -mcpu=${CPU_MCPU} never took effect on any compile command"
+[[ "${ccxx_total}" -gt 0 ]] || die "GATE: no C/C++ compile commands seen; cannot verify tuning"
+[[ "${untuned}" -eq 0 ]] || die "GATE: ${untuned} C/C++ TU(s) not tuned for ${CPU_MCPU}: ${untuned_examples}"
 EFFECTIVE_FLAGS="-mcpu=${CPU_MCPU}"
-log "GATE PASSED: every compile command is tuned exclusively for ${CPU_MCPU}"
+ARCH_SUMMARY="$(jq -n --argjson cmds "${#CMDS[@]}" --argjson ccxx "${ccxx_total}" \
+  --argjson tuned "${tuned}" --argjson conflicts "${conflicts}" --argjson untuned "${untuned}" \
+  '{compile_commands:$cmds, ccxx_tus:$ccxx, tuned:$tuned, conflicts:$conflicts, untuned:$untuned}')"
+log "GATE PASSED: all ${ccxx_total} C/C++ TUs tuned for ${CPU_MCPU}, no conflicts"
 
 # --- 4. Harvest artifacts ---------------------------------------------------------
 for lib in ${STATIC_LIBS}; do
@@ -127,8 +154,10 @@ jq -n \
   --arg llc_date      "${LLAMA_CPP_DATE}" \
   --arg rustv         "$(rustc --version)" \
   --arg cmakev        "$(cmake --version | head -n1)" \
-  --arg image         "${COMPILER_IMAGE:-amazonlinux:2023}" \
+  --arg image         "${COMPILER_IMAGE:-amazonlinux:2023 (unrecorded)}" \
   --arg cc            "$(${CC:-cc} --version | head -n1)" \
+  --arg cxx           "$(${CXX:-c++} --version | head -n1)" \
+  --arg pkgs          "$(command -v rpm >/dev/null && rpm -q glibc gcc gcc-c++ libstdc++ libgomp 2>/dev/null | tr '\n' ';' || echo 'rpm-unavailable')" \
   --arg triple        "${TARGET_TRIPLE}" \
   --arg cpu           "${CPU_MCPU}" \
   --arg flags         "${EFFECTIVE_FLAGS}" \
@@ -139,17 +168,21 @@ jq -n \
   --arg built_at      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg glibc         "$(ldd --version | head -n1)" \
   --arg lscpu         "$(lscpu 2>/dev/null | tr '\n' ';' || echo unknown)" \
+  --argjson arch      "${ARCH_SUMMARY}" \
   --argjson libs      "${LIBS_JSON}" \
   '{
      artifact_contract_version: $contract,
      llama_cpp_sys_2: { version: $crate_tag, git_tag: $crate_tag },
      llama_cpp: { submodule_commit: $llc_commit, describe: $llc_describe, date: $llc_date },
      rust: $rustv, cmake: $cmakev,
-     compiler: { image: $image, cc: $cc },
+     # Build environment is RESOLVED-and-RECORDED provenance (not a controlled runtime
+     # pin): consumers pin the artifact checksum, and CI gates the environment envelope.
+     build_env: { image: $image, cc: $cc, cxx: $cxx, packages: $pkgs, glibc: $glibc },
      target_triple: $triple, cpu_profile: $cpu, effective_arch_flags: $flags,
+     arch_flag_summary: $arch,
      features: ($features | split(",")),
      runner: { kind: "github-hosted", label: "ubuntu-24.04-arm", uarch: "neoverse-n2",
-               glibc: $glibc, lscpu: $lscpu },
+               lscpu: $lscpu },
      libs: $libs, link_line: $link_line, bindings_sha256: $bindings_sha,
      builder_git_sha: $builder_sha, built_at: $built_at,
      smoke: null, benchmark: null
