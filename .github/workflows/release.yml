@@ -18,28 +18,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve pinned AL2023 aarch64 digest
+      - name: Resolve AL2023 aarch64 digest
         id: img
         run: |
           set -euo pipefail
           # AL2023 is resolved-and-recorded provenance, not a runtime pin. Use the optional
           # AL2023_DIGEST override if set (reproducible build); otherwise resolve the current
-          # index digest for the tag. Either way it is recorded in build-info.json, and the
-          # build-env envelope (gcc major / glibc floor) is gated in build.sh.
+          # ARM64 manifest digest for the tag. Must select the arm64 entry — .[0]/index digest
+          # can point at amd64 and would exec-format-error on this arm64 runner.
           source scripts/config.env
           digest="${AL2023_DIGEST:-}"
           if [[ -z "${digest}" ]]; then
-            digest="$(docker manifest inspect amazonlinux:2023 --verbose \
-              | jq -r 'if type=="array" then .[0] else . end | .Descriptor.digest' 2>/dev/null || true)"
-            [[ -n "${digest}" && "${digest}" != "null" ]] \
-              || digest="$(docker buildx imagetools inspect amazonlinux:2023 --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            digest="$(docker manifest inspect amazonlinux:2023 \
+              | jq -r '.manifests[] | select(.platform.architecture=="arm64" and .platform.os=="linux") | .digest' \
+              | head -n1)"
           fi
+          [[ -n "${digest}" && "${digest}" != "null" ]] || { echo "could not resolve arm64 digest" >&2; exit 1; }
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "image=amazonlinux:2023@${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Build builder image
         run: |
-          docker build --build-arg AL2023_DIGEST="2023@${{ steps.img.outputs.digest }}" \
+          docker build --platform linux/arm64 \
+            --build-arg AL2023_DIGEST="2023@${{ steps.img.outputs.digest }}" \
             -t static-llama-builder:ci .
 
       - name: Build + smoke + bench + package (in container)
