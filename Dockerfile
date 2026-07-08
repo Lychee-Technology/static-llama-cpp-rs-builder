@@ -14,14 +14,20 @@ ARG CMAKE_VERSION=3.29.6
 ARG RUST_VERSION=1.85.0
 
 # Toolchain: gcc/g++ 11 (AL2023 default), git, make, ninja, python (ggml scripts), curl.
+# clang/clang-devel provide libclang.so, required by bindgen in llama-cpp-sys-2's build.rs
+# (only for binding generation — the archives themselves are still built with gcc).
 RUN dnf -y update \
  && dnf -y install \
       gcc gcc-c++ \
+      clang clang-devel \
       git make ninja-build \
       python3 python3-pip \
       tar gzip xz which findutils jq \
       openssl-devel perl \
  && dnf clean all
+
+# bindgen (clang-sys) locates libclang here on AL2023.
+ENV LIBCLANG_PATH=/usr/lib64
 
 # CMake pinned to an exact version (do not rely on the distro package).
 RUN set -eux; \
