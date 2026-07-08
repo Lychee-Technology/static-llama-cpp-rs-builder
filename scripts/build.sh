@@ -66,8 +66,9 @@ patch_ggml_arm_arch "${SRC}/llama-cpp-sys-2/build.rs" \
 log "Patched build.rs: GGML_CPU_ARM_ARCH=${CPU_MARCH}"
 
 # --- 2. Build the -sys crate with N1 tuning ---------------------------------------
-# ISA comes from GGML_CPU_ARM_ARCH (-> -march=${CPU_MARCH} on the CPU kernels, patched
-# above); CFLAGS carries only -mtune (N1 scheduling) so there is no -march/-mcpu conflict.
+# CFLAGS/CXXFLAGS apply -O3 -march=${CPU_MARCH} -mtune to ALL TUs. ggml also adds
+# -march=${CPU_MARCH} to its CPU kernels (via the GGML_CPU_ARM_ARCH patch above) — the
+# SAME value, so there is no conflict. No -mcpu, no -flto (see config.env).
 export CFLAGS="${CFLAGS_TUNE} ${CFLAGS:-}"
 export CXXFLAGS="${CFLAGS_TUNE} ${CXXFLAGS:-}"
 export CMAKE_EXPORT_COMPILE_COMMANDS=ON        # for the flag-verification gate

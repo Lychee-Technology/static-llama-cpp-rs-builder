@@ -28,7 +28,7 @@ LICENSES/       llama.cpp, ggml, and builder licenses (all MIT)
 ## Build profile (v2)
 
 - Target: `aarch64-unknown-linux-gnu`, tuned for Graviton2 / N1 via
-  **`-march=armv8.2-a+fp16+dotprod`** (ISA, incl. dotprod — set through ggml's
+  **`-O3 -march=armv8.2-a+fp16+dotprod+rcpc`** (ISA, incl. dotprod + LRCPC — also set through ggml's
   `GGML_CPU_ARM_ARCH`) **`-mtune=neoverse-n1`** (scheduling). Built on an N2 runner but
   never with `native`, and never `-mcpu` (it would collide with ggml's own `-march`).
 - Crate: `llama-cpp-sys-2` pinned tag `0.1.151`; features `common` (no `openmp` — ggml uses

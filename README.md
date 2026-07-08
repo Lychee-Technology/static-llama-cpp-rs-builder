@@ -21,7 +21,7 @@ Single source of truth: [`scripts/config.env`](scripts/config.env).
 | Rust | `1.85.0` (`rust-toolchain.toml`) |
 | CMake | `3.29.6` (`Dockerfile`) |
 | Compiler | Clang 18 (AL2023 `clang18`), GNU libstdc++ |
-| CPU profile | `-march=armv8.2-a+fp16+dotprod -mtune=neoverse-n1` (never `native`/`-mcpu`) |
+| CPU profile | `-O3 -march=armv8.2-a+fp16+dotprod+rcpc -mtune=neoverse-n1` (no `native`/`-mcpu`/`-flto`) |
 | Features | `common` (no OpenMP — ggml threadpool, so no libgomp/libomp dep) |
 
 **Build image (not a pin):** `amazonlinux:2023` is **resolved at build time and recorded** in
