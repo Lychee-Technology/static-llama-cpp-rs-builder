@@ -1,0 +1,148 @@
+name: verify-pgo
+
+# Manually-triggered verification of the opt-in PGO build path (scripts/build.sh PGO=1).
+# Runs on the same GitHub-managed ARM64 (Neoverse N2) runner + resolved AL2023 container as
+# the release workflow. Parameterizes the PGO training model, then asserts: the image ships
+# the PGO toolchain, the 3-phase build produces a recorded profile, and bench reports a
+# non-regressing pgo_gain plus a passing (both-PGO) parity check.
+#
+# The profile is quant-type-specific, so pass an IQ4_NL (or whatever you deploy) embedding
+# GGUF. That one model serves as BOTH the PGO training model and the bench workload model,
+# so training / measurement / deploy shapes match.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pgo_model_url:
+        description: "URL of the embedding GGUF to train the PGO profile on (the quant you deploy, e.g. IQ4_NL). Falls back to the PGO_MODEL_URL repo variable."
+        required: false
+        default: ""
+      pgo_model_sha256:
+        description: "Expected sha256 of the PGO training model. Falls back to the PGO_MODEL_SHA256 repo variable."
+        required: false
+        default: ""
+      pgo_train_iters:
+        description: "PGO training iterations (encodes of the training sequence)."
+        required: false
+        default: "300"
+      min_pgo_gain:
+        description: "Minimum acceptable pgo_gain (source_pgo / source_nopgo). The run fails below this; 1.00 = require no regression."
+        required: false
+        default: "1.00"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-pgo:
+    runs-on: ubuntu-24.04-arm      # GitHub-hosted ARM64 (Neoverse N2)
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve PGO training model (input or repo variable)
+        id: model
+        env:
+          IN_URL: ${{ inputs.pgo_model_url }}
+          IN_SHA: ${{ inputs.pgo_model_sha256 }}
+          VAR_URL: ${{ vars.PGO_MODEL_URL }}
+          VAR_SHA: ${{ vars.PGO_MODEL_SHA256 }}
+        run: |
+          set -euo pipefail
+          url="${IN_URL:-}"; [[ -z "${url}" ]] && url="${VAR_URL:-}"
+          sha="${IN_SHA:-}"; [[ -z "${sha}" ]] && sha="${VAR_SHA:-}"
+          if [[ -z "${url}" || -z "${sha}" ]]; then
+            echo "::error::provide pgo_model_url + pgo_model_sha256 inputs, or set PGO_MODEL_URL / PGO_MODEL_SHA256 repo variables"
+            exit 1
+          fi
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve AL2023 aarch64 digest
+        id: img
+        run: |
+          set -euo pipefail
+          # Resolved-and-recorded provenance, not a runtime pin (mirrors release.yml). Must
+          # select the arm64 manifest entry — an index/amd64 digest would exec-format-error.
+          source scripts/config.env
+          digest="${AL2023_DIGEST:-}"
+          if [[ -z "${digest}" ]]; then
+            digest="$(docker manifest inspect amazonlinux:2023 \
+              | jq -r '.manifests[] | select(.platform.architecture=="arm64" and .platform.os=="linux") | .digest' \
+              | head -n1)"
+          fi
+          [[ -n "${digest}" && "${digest}" != "null" ]] || { echo "could not resolve arm64 digest" >&2; exit 1; }
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "image=amazonlinux:2023@${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Build builder image (also proves the PGO deps llvm18 + compiler-rt resolve)
+        run: |
+          docker build --platform linux/arm64 \
+            --build-arg AL2023_DIGEST="2023@${{ steps.img.outputs.digest }}" \
+            -t static-llama-builder:ci .
+
+      - name: Verify PGO toolchain present in image
+        run: |
+          docker run --rm static-llama-builder:ci bash -euo pipefail -c '
+            pd="$(command -v llvm-profdata-18 || command -v llvm-profdata || echo /usr/lib64/llvm18/bin/llvm-profdata)"
+            [ -x "$pd" ] || { echo "::error::llvm-profdata not found in image"; exit 1; }
+            "$pd" --version
+            # compiler-rt profile runtime (needed to link -fprofile-generate binaries).
+            find / -name "libclang_rt.profile-*.a" 2>/dev/null | head -n1 | grep . \
+              || { echo "::error::libclang_rt.profile not found (compiler-rt package missing)"; exit 1; }
+          '
+
+      - name: PGO build + bench + assertions (in container)
+        env:
+          SMOKE_MODEL_URL: ${{ steps.model.outputs.url }}
+          SMOKE_MODEL_SHA256: ${{ steps.model.outputs.sha }}
+          PGO_TRAIN_ITERS: ${{ inputs.pgo_train_iters }}
+          MIN_PGO_GAIN: ${{ inputs.min_pgo_gain }}
+          COMPILER_IMAGE: ${{ steps.img.outputs.image }}
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/work" -w /work \
+            -e SMOKE_MODEL_URL -e SMOKE_MODEL_SHA256 -e PGO_TRAIN_ITERS -e MIN_PGO_GAIN -e COMPILER_IMAGE \
+            static-llama-builder:ci bash -euo pipefail -c '
+              git config --global --add safe.directory "*"
+              # One model, used as BOTH PGO_TRAIN_MODEL and the bench workload model.
+              export SMOKE_MODEL="$(bash smoke/fixtures/fetch-model.sh)"
+              export PGO=1
+              export PGO_TRAIN_MODEL="${SMOKE_MODEL}"
+              export RESULTS=/work/.build/results; mkdir -p "${RESULTS}"
+
+              echo "::group::PGO build (instrument -> train -> optimize)"
+              bash scripts/build.sh
+              echo "::endgroup::"
+
+              echo "::group::PGO bench (pgo_gain + both-PGO parity)"
+              bash scripts/bench.sh
+              echo "::endgroup::"
+
+              echo "=== build-info pgo block ==="; jq .pgo dist/build-info.json
+              echo "=== bench summary ===";        jq "{pgo, pgo_gain, prebuilt_to_source_ratio, passed}" "${RESULTS}/bench.json"
+
+              # --- assertions ---------------------------------------------------------
+              jq -e ".pgo.enabled == true"         dist/build-info.json >/dev/null || { echo "::error::pgo not enabled in build-info.json"; exit 1; }
+              jq -e ".pgo.profdata_sha256 != null" dist/build-info.json >/dev/null || { echo "::error::pgo.profdata_sha256 not recorded"; exit 1; }
+
+              gain="$(jq -r ".pgo_gain" "${RESULTS}/bench.json")"
+              passed="$(jq -r ".passed"  "${RESULTS}/bench.json")"
+              echo "pgo_gain=${gain}  parity_passed=${passed}  min_gain=${MIN_PGO_GAIN}"
+              [ "${passed}" = "true" ] || { echo "::error::parity (prebuilt vs from-source PGO) check failed"; exit 1; }
+              awk -v g="${gain}" -v m="${MIN_PGO_GAIN}" "BEGIN{ exit !(g+0 >= m+0) }" \
+                || { echo "::error::pgo_gain ${gain} is below the required minimum ${MIN_PGO_GAIN}"; exit 1; }
+
+              echo "PGO verification PASSED (gain=${gain}, parity ok)"
+              # Make evidence world-readable for the (non-root) upload step; dist/ is root-owned.
+              chmod -R a+rX dist "${RESULTS}" || true
+            '
+
+      - name: Upload PGO evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pgo-verify-evidence
+          path: |
+            dist/build-info.json
+            .build/results/bench.json
+          if-no-files-found: warn

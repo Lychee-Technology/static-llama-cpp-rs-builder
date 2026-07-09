@@ -23,6 +23,7 @@ Single source of truth: [`scripts/config.env`](scripts/config.env).
 | Compiler | Clang 18 (AL2023 `clang18`), GNU libstdc++ |
 | CPU profile | `-O3 -march=armv8.2-a+fp16+dotprod+rcpc -mtune=neoverse-n1` (no `native`/`-mcpu`/`-flto`) |
 | Features | none (no OpenMP → ggml threadpool, no libgomp; no `common` → no extra wrapper archive) |
+| PGO | optional (`PGO=1`) — profile-guided optimization trained on the embedding hot path; codegen-only, no contract change (see [CONTRACT.md](CONTRACT.md)) |
 
 **Build image (not a pin):** `amazonlinux:2023` is **resolved at build time and recorded** in
 `build-info.json` (`build_env`) for traceability, not pinned as a product input — LTEmbed deploys
@@ -63,3 +64,18 @@ docker run --rm -v "$PWD:/work" -w /work \
 
 Before the first release, pin the smoke/bench model: set the `SMOKE_MODEL_URL` /
 `SMOKE_MODEL_SHA256` repo variables (see `smoke/fixtures/fetch-model.sh`).
+
+### Optional: PGO-optimized build
+
+ISA tuning for N1 is already maxed (dotprod + fp16), so the remaining compile-time lever is
+**PGO**. It is opt-in and trains on the exact embedding hot path (`llama_encode`):
+
+```sh
+# PGO_TRAIN_MODEL must be the quant you deploy (e.g. IQ4_NL) — the profile is quant-specific.
+PGO=1 PGO_TRAIN_MODEL="$SMOKE_MODEL" scripts/build.sh   # instrument → train → optimize
+PGO=1 SMOKE_MODEL="$SMOKE_MODEL"     scripts/bench.sh    # reports pgo_gain + a both-PGO parity check
+```
+
+`build.sh` records the profile's `sha256` + training metadata in `build-info.json` (`pgo`
+block); `bench.sh` writes the measured `pgo_gain` into `bench.json`. Needs `llvm-profdata`
+(`llvm18`) and the compiler-rt profile runtime in the image. Default builds are non-PGO.

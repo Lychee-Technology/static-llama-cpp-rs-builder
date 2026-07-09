@@ -3,11 +3,23 @@ name: build-static-llama-cpp
 # Builds Graviton2 (Neoverse N1) tuned static llama.cpp archives on a GitHub-managed
 # ARM64 runner (Neoverse N2, backward-compatible with N1), inside a resolved-and-recorded
 # AL2023 container. Publishes verified artifacts as a GitHub Release on tag push.
+#
+# Optional PGO (profile-guided optimization): enable via the `pgo` workflow_dispatch input,
+# or the RELEASE_PGO repo variable ("1") for tag-triggered releases. The profile is
+# quant-specific and trains on the smoke/bench model, so for a PGO release point
+# SMOKE_MODEL_URL/SHA256 at the quant you deploy (e.g. IQ4_NL). Codegen-only: pgo.enabled
+# is recorded in build-info.json; the artifact contract is unchanged. Default off.
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      pgo:
+        description: "Build a PGO-optimized (profile-guided) release. Trains the profile on the smoke/bench model, so point SMOKE_MODEL_URL at the quant you deploy (e.g. IQ4_NL)."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write   # create releases / upload assets
@@ -17,6 +29,22 @@ jobs:
     runs-on: ubuntu-24.04-arm      # GitHub-hosted ARM64 (Neoverse N2)
     steps:
       - uses: actions/checkout@v7
+
+      - name: Resolve PGO toggle
+        id: pgo
+        env:
+          IN_PGO: ${{ inputs.pgo }}       # "true"/"false" on manual dispatch; empty on tag push
+          VAR_PGO: ${{ vars.RELEASE_PGO }} # tag pushes have no input, so fall back to this var
+        run: |
+          set -euo pipefail
+          # Enabled by the workflow_dispatch boolean, OR (for tag-triggered releases) the
+          # RELEASE_PGO repo variable set to "1"/"true". Default off — plain single-phase build.
+          enabled=0
+          if [[ "${IN_PGO:-}" == "true" ]]; then enabled=1
+          elif [[ "${VAR_PGO:-}" == "1" || "${VAR_PGO:-}" == "true" ]]; then enabled=1
+          fi
+          echo "enabled=${enabled}" >> "$GITHUB_OUTPUT"
+          echo "PGO-optimized release build: ${enabled}"
 
       - name: Resolve AL2023 aarch64 digest
         id: img
@@ -48,15 +76,21 @@ jobs:
           SMOKE_MODEL_URL: ${{ vars.SMOKE_MODEL_URL }}
           SMOKE_MODEL_SHA256: ${{ vars.SMOKE_MODEL_SHA256 }}
           COMPILER_IMAGE: ${{ steps.img.outputs.image }}
+          PGO: ${{ steps.pgo.outputs.enabled }}          # 1 => 3-phase profile-guided build
+          PGO_TRAIN_ITERS: ${{ vars.PGO_TRAIN_ITERS }}   # optional override; empty => config default
         run: |
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/work" -w /work \
-            -e SMOKE_MODEL_URL -e SMOKE_MODEL_SHA256 -e COMPILER_IMAGE \
+            -e SMOKE_MODEL_URL -e SMOKE_MODEL_SHA256 -e COMPILER_IMAGE -e PGO -e PGO_TRAIN_ITERS \
             static-llama-builder:ci bash -euo pipefail -c '
               git config --global --add safe.directory "*"
-              bash scripts/build.sh
+              # Fetch the model FIRST: when PGO=1, build.sh trains the profile on it
+              # (config.env defaults PGO_TRAIN_MODEL=${SMOKE_MODEL}), so it must exist BEFORE
+              # build.sh runs. It also serves as the bench workload, so train/measure/deploy
+              # shapes match. Harmless (just early) for a non-PGO build.
               export SMOKE_MODEL="$(bash smoke/fixtures/fetch-model.sh)"
               export RESULTS=/work/.build/results; mkdir -p "$RESULTS"
+              bash scripts/build.sh
               SMOKE_RESULT="$RESULTS/smoke.json" \
                 cargo run --release --manifest-path smoke/Cargo.toml
               bash scripts/bench.sh

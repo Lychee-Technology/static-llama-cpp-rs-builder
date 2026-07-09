@@ -65,12 +65,79 @@ patch_ggml_arm_arch "${SRC}/llama-cpp-sys-2/build.rs" \
   || die "Failed to inject GGML_CPU_ARM_ARCH into build.rs (upstream layout changed?)"
 log "Patched build.rs: GGML_CPU_ARM_ARCH=${CPU_MARCH}"
 
+# --- 2a. PGO instrument + train (only when PGO=1) ---------------------------------
+# Off by default. When PGO=1: build an instrumented copy in a SEPARATE target dir (so
+# cmake/ninja truly recompile), run the real embedding hot path against a representative
+# model to collect a profile, then feed -fprofile-use into the shipped build below. Only
+# the final (optimized) build is harvested/gated; the instrumented build is throwaway.
+PGO_USE_FLAGS=""            # appended to the shipped build's CFLAGS/CXXFLAGS when PGO=1
+PGO_PROFDATA=""            # set to the merged profile path when PGO=1 (recorded in build-info)
+if [[ "${PGO}" == "1" ]]; then
+  [[ -n "${PGO_TRAIN_MODEL}" && -f "${PGO_TRAIN_MODEL}" ]] \
+    || die "PGO=1 needs PGO_TRAIN_MODEL to point at a readable GGUF (got: '${PGO_TRAIN_MODEL}')"
+  # llvm-profdata ships in the llvm18 package (binary name/path varies); resolve robustly.
+  LLVM_PROFDATA="$(command -v llvm-profdata-18 || command -v llvm-profdata \
+                   || echo /usr/lib64/llvm18/bin/llvm-profdata)"
+  [[ -x "${LLVM_PROFDATA}" ]] || die "llvm-profdata not found (install the llvm18 package in the build image)"
+
+  PGO_DIR="${WORK}/pgo"
+  PGO_GEN_TARGET="${PGO_DIR}/target-gen"    # instrumented build's CARGO_TARGET_DIR
+  PGO_GEN_LIBS="${PGO_DIR}/gen-libs"        # harvested instrumented .a for the train link
+  PGO_RAW="${PGO_DIR}/raw"                  # *.profraw drop
+  PGO_PROFDATA="${PGO_DIR}/pgo.profdata"    # merged profile consumed by -fprofile-use
+  rm -rf "${PGO_DIR}"; mkdir -p "${PGO_GEN_LIBS}" "${PGO_RAW}"
+
+  # (1) Instrumented build. -fprofile-generate is added to the same N1 tuning flags; a
+  #     distinct CARGO_TARGET_DIR guarantees a clean recompile independent of the final one.
+  log "PGO 1/3: instrumented build (${PGO_GEN_FLAGS})"
+  ( cd "${SRC}"
+    export CFLAGS="${CFLAGS_TUNE} ${PGO_GEN_FLAGS} ${CFLAGS:-}"
+    export CXXFLAGS="${CFLAGS_TUNE} ${PGO_GEN_FLAGS} ${CXXFLAGS:-}"
+    export CARGO_TARGET_DIR="${PGO_GEN_TARGET}"
+    export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
+    cargo build --release -p llama-cpp-sys-2 ${CRATE_FEATURES:+--features "${CRATE_FEATURES}"} )
+  GEN_OUT="$(find "${PGO_GEN_TARGET}" -type d -name out -path '*release/build*llama-cpp-sys-2*' -print -quit)"
+  [[ -n "${GEN_OUT}" ]] || die "PGO: instrumented OUT_DIR not found"
+  for lib in ${STATIC_LIBS}; do
+    cp "$(find "${GEN_OUT}" -name "${lib}" -print -quit)" "${PGO_GEN_LIBS}/${lib}" \
+      || die "PGO: instrumented ${lib} not found"
+  done
+
+  # (2) Train. Link scripts/pgo-train.cpp against the instrumented archives with clang++
+  #     (so libclang_rt.profile is auto-linked and __llvm_profile_* resolve), run the
+  #     embedding workload, and merge the emitted *.profraw into one profile.
+  log "PGO 2/3: training on $(basename "${PGO_TRAIN_MODEL}") (${PGO_TRAIN_ITERS} iters)"
+  PGO_TRAIN_BIN="${PGO_DIR}/pgo-train"
+  # shellcheck disable=SC2046  # word-splitting SYSTEM_LINK_LIBS into -l flags is intended.
+  "${CXX}" ${PGO_GEN_FLAGS} -O2 \
+    -I"${LLAMA_CPP_DIR}/include" -I"${LLAMA_CPP_DIR}/ggml/include" \
+    "${ROOT}/scripts/pgo-train.cpp" \
+    "${PGO_GEN_LIBS}/libllama.a" "${PGO_GEN_LIBS}/libggml.a" \
+    "${PGO_GEN_LIBS}/libggml-cpu.a" "${PGO_GEN_LIBS}/libggml-base.a" \
+    $(for l in ${SYSTEM_LINK_LIBS}; do printf -- '-l%s ' "$l"; done) \
+    -o "${PGO_TRAIN_BIN}" \
+    || die "PGO: failed to build/link the training harness"
+  LLVM_PROFILE_FILE="${PGO_RAW}/pgo-%p.profraw" \
+    "${PGO_TRAIN_BIN}" "${PGO_TRAIN_MODEL}" "${PGO_TRAIN_ITERS}" \
+    || die "PGO: training run failed"
+  "${LLVM_PROFDATA}" merge -output="${PGO_PROFDATA}" "${PGO_RAW}"/*.profraw \
+    || die "PGO: llvm-profdata merge failed"
+  [[ -s "${PGO_PROFDATA}" ]] || die "PGO: merged profile is empty (${PGO_PROFDATA})"
+  PGO_USE_FLAGS="-fprofile-use=${PGO_PROFDATA} ${PGO_USE_WARN_FLAGS}"
+  # Force the shipped build (which uses ${SRC}/target) to recompile from scratch: a stale
+  # non-profiled build cached from a prior run must not be shipped as "PGO". Fresh CI clones
+  # are already clean; this only bites local reruns.
+  rm -rf "${SRC}/target"
+  log "PGO 3/3: optimized build with -fprofile-use ($(basename "${PGO_PROFDATA}"))"
+fi
+
 # --- 2. Build the -sys crate with N1 tuning ---------------------------------------
 # CFLAGS/CXXFLAGS apply -O3 -march=${CPU_MARCH} -mtune to ALL TUs. ggml also adds
 # -march=${CPU_MARCH} to its CPU kernels (via the GGML_CPU_ARM_ARCH patch above) — the
-# SAME value, so there is no conflict. No -mcpu, no -flto (see config.env).
-export CFLAGS="${CFLAGS_TUNE} ${CFLAGS:-}"
-export CXXFLAGS="${CFLAGS_TUNE} ${CXXFLAGS:-}"
+# SAME value, so there is no conflict. No -mcpu, no -flto (see config.env). When PGO=1,
+# ${PGO_USE_FLAGS} adds -fprofile-use (no -march/-mcpu, so the flag gate below is unaffected).
+export CFLAGS="${CFLAGS_TUNE} ${PGO_USE_FLAGS} ${CFLAGS:-}"
+export CXXFLAGS="${CFLAGS_TUNE} ${PGO_USE_FLAGS} ${CXXFLAGS:-}"
 export CMAKE_EXPORT_COMPILE_COMMANDS=ON        # for the flag-verification gate
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
 
@@ -144,7 +211,7 @@ log "Flag gate: ${#CMDS[@]} cmds, ${ccxx_total} C/C++ TUs, ${dotprod} with -marc
 [[ "${untuned}" -eq 0 ]] || die "GATE: ${untuned} C/C++ TU(s) missing -mtune=${CPU_MTUNE}: ${untuned_examples}"
 [[ "${badopt}" -eq 0 ]] || die "GATE: ${badopt} C/C++ TU(s) not built at effective -O3: ${badopt_examples}"
 [[ "${dotprod}" -gt 0 ]] || die "GATE: -march=${CPU_MARCH} never applied — CPU backend not dotprod-tuned"
-EFFECTIVE_FLAGS="-O3 -march=${CPU_MARCH} -mtune=${CPU_MTUNE}"
+EFFECTIVE_FLAGS="-O3 -march=${CPU_MARCH} -mtune=${CPU_MTUNE}${PGO_USE_FLAGS:+ ${PGO_USE_FLAGS}}"
 ARCH_SUMMARY="$(jq -n --argjson cmds "${#CMDS[@]}" --argjson ccxx "${ccxx_total}" \
   --argjson dotprod "${dotprod}" --argjson conflicts "${conflicts}" --argjson untuned "${untuned}" \
   --argjson badopt "${badopt}" --arg march "${CPU_MARCH}" --arg mtune "${CPU_MTUNE}" \
@@ -197,6 +264,10 @@ jq -n \
   --arg built_at      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg glibc         "$(ldd --version | head -n1)" \
   --arg lscpu         "$(lscpu 2>/dev/null | tr '\n' ';' || echo unknown)" \
+  --arg pgo_enabled   "${PGO}" \
+  --arg pgo_model     "$( [[ -n "${PGO_PROFDATA}" ]] && basename "${PGO_TRAIN_MODEL}" || echo "" )" \
+  --arg pgo_iters     "$( [[ "${PGO}" == "1" ]] && echo "${PGO_TRAIN_ITERS}" || echo "" )" \
+  --arg pgo_sha       "$( [[ -f "${PGO_PROFDATA:-/nonexistent}" ]] && sha256sum "${PGO_PROFDATA}" | awk '{print $1}' || echo "" )" \
   --argjson arch      "${ARCH_SUMMARY}" \
   --argjson libs      "${LIBS_JSON}" \
   '{
@@ -209,6 +280,13 @@ jq -n \
      build_env: { image: $image, cc: $cc, cxx: $cxx, packages: $pkgs, glibc: $glibc },
      target_triple: $triple, cpu_profile: $cpu, effective_arch_flags: $flags,
      arch_flag_summary: $arch,
+     # PGO changes codegen only (no ABI/link/shape change); the profile is a recorded build
+     # input. enabled=false means a plain single-phase build (the default).
+     pgo: { enabled: ($pgo_enabled == "1"),
+            mode: (if $pgo_enabled == "1" then "ir-pgo (-fprofile-generate/-fprofile-use)" else null end),
+            training_model: (if $pgo_model == "" then null else $pgo_model end),
+            train_iters: (if $pgo_iters == "" then null else ($pgo_iters | tonumber) end),
+            profdata_sha256: (if $pgo_sha == "" then null else $pgo_sha end) },
      features: ($features | split(",")),
      runner: { kind: "github-hosted", label: "ubuntu-24.04-arm", uarch: "neoverse-n2",
                lscpu: $lscpu },

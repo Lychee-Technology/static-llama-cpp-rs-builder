@@ -18,10 +18,15 @@ ARG RUST_VERSION=1.85.0
 # Compiler: Clang 18 (clang18) — builds the archives AND (via libclang from clang18-devel)
 # drives bindgen. gcc/g++ are still installed because clang uses GNU libstdc++ headers/crt
 # on Linux and rustc links via the `cc` (gcc) driver. python for ggml scripts.
+#
+# llvm18 provides `llvm-profdata` and compiler-rt provides libclang_rt.profile — both are
+# needed ONLY for the opt-in PGO build path (scripts/build.sh with PGO=1); the default
+# single-phase build does not use them. If AL2023 renames either package, the image build
+# fails loudly here (verify with `llvm-profdata --version` inside the container).
 RUN dnf -y update \
  && dnf -y install \
       gcc gcc-c++ \
-      clang18 clang18-devel \
+      clang18 clang18-devel llvm18 compiler-rt \
       git make ninja-build \
       python3 python3-pip \
       tar gzip xz which findutils jq \

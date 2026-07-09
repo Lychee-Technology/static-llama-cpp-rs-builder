@@ -35,6 +35,15 @@ LICENSES/       llama.cpp, ggml, and builder licenses (all MIT)
   uses its built-in threadpool, no libgomp/libomp dep; no `common` — it would add a
   `llama_rs_*` wrapper archive + bindings decls not needed for direct FFI).
 - Compiler: **Clang 18** (AL2023 `clang18`), GNU libstdc++.
+- **PGO (optional, `PGO=1`):** an opt-in profile-guided-optimization build. `build.sh` does a
+  3-phase build — instrument (`-fprofile-generate`) → train on the real embedding hot path
+  (`scripts/pgo-train.cpp`, `llama_encode`) against `PGO_TRAIN_MODEL` → optimize
+  (`-fprofile-use`). It changes **codegen only** — not the shipped `.a` set, link line,
+  features, binding ABI, or `dist/` layout — so it does **not** bump the contract version.
+  The profile is quant-type-specific (train on the deployed quant, e.g. IQ4_NL); its
+  `sha256`, training model, and iteration count are recorded in `build-info.json`'s `pgo`
+  block, and `bench.json` carries the measured `pgo_gain`. Default builds are non-PGO
+  (`pgo.enabled = false`).
 - Build image: `amazonlinux:2023` (aarch64), **resolved at build time and recorded** — not a
   reproducibility pin. LTEmbed deploys on AWS-managed AL2023 (Lambda/Fargate) whose patch
   level AWS controls, so **consumers pin the release artifact checksum, not the build image**.
