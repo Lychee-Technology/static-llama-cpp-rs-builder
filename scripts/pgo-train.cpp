@@ -15,7 +15,26 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <csignal>
+#include <execinfo.h>
+#include <unistd.h>
+
+// Print a symbolized backtrace on a fatal signal so a crash in the PGO training run shows
+// WHERE it died in the CI log (the training binary is linked with -g -rdynamic so static
+// llama/ggml frames resolve). Async-signal-safe: only backtrace_symbols_fd + _exit.
+static void on_fatal(int sig) {
+    void * bt[64];
+    int n = backtrace(bt, 64);
+    fprintf(stderr, "\n[pgo-train] FATAL: signal %d — backtrace (%d frames):\n", sig, n);
+    fflush(stderr);
+    backtrace_symbols_fd(bt, n, STDERR_FILENO);
+    _exit(139);
+}
+
 int main(int argc, char ** argv) {
+    signal(SIGSEGV, on_fatal);
+    signal(SIGABRT, on_fatal);
+    signal(SIGILL, on_fatal);
     if (argc < 2) {
         fprintf(stderr, "usage: %s <model.gguf> [iters]\n", argv[0]);
         return 2;

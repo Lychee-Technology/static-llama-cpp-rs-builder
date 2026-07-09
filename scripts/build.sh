@@ -109,7 +109,9 @@ if [[ "${PGO}" == "1" ]]; then
   log "PGO 2/3: training on $(basename "${PGO_TRAIN_MODEL}") (${PGO_TRAIN_ITERS} iters)"
   PGO_TRAIN_BIN="${PGO_DIR}/pgo-train"
   # shellcheck disable=SC2046  # word-splitting SYSTEM_LINK_LIBS into -l flags is intended.
-  "${CXX}" ${PGO_GEN_FLAGS} -O2 \
+  # -g -rdynamic so a SIGSEGV in the training run yields a symbolized backtrace (the harness
+  # installs a handler); -O2 keeps the profiled hot path representative.
+  "${CXX}" ${PGO_GEN_FLAGS} -O2 -g -rdynamic \
     -I"${LLAMA_CPP_DIR}/include" -I"${LLAMA_CPP_DIR}/ggml/include" \
     "${ROOT}/scripts/pgo-train.cpp" \
     "${PGO_GEN_LIBS}/libllama.a" "${PGO_GEN_LIBS}/libggml.a" \
