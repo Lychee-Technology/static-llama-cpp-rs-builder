@@ -19,14 +19,17 @@ ARG RUST_VERSION=1.96.1
 # drives bindgen. gcc/g++ are still installed because clang uses GNU libstdc++ headers/crt
 # on Linux and rustc links via the `cc` (gcc) driver. python for ggml scripts.
 #
-# llvm18 provides `llvm-profdata` and compiler-rt provides libclang_rt.profile — both are
+# llvm18 provides `llvm-profdata` and compiler-rt18 provides libclang_rt.profile — both are
 # needed ONLY for the opt-in PGO build path (scripts/build.sh with PGO=1); the default
-# single-phase build does not use them. If AL2023 renames either package, the image build
-# fails loudly here (verify with `llvm-profdata --version` inside the container).
+# single-phase build does not use them. compiler-rt MUST be the clang-18-matched package
+# (compiler-rt18): AL2023's unversioned `compiler-rt` is clang-15's runtime, and linking
+# clang-18 -fprofile-generate against the clang-15 profile runtime SEGFAULTS at run time
+# (ABI mismatch). compiler-rt18 installs the profile lib in clang-18's per-target search
+# path so no path hack is needed. If AL2023 renames the package the image build fails here.
 RUN dnf -y update \
  && dnf -y install \
       gcc gcc-c++ \
-      clang18 clang18-devel llvm18 compiler-rt \
+      clang18 clang18-devel llvm18 compiler-rt18 \
       git make ninja-build \
       python3 python3-pip \
       tar gzip xz which findutils jq \
@@ -38,26 +41,17 @@ ENV CC=clang-18 CXX=clang++-18
 # bindgen (clang-sys) locates libclang here on AL2023 (llvm18 tree, not /usr/lib64).
 ENV LIBCLANG_PATH=/usr/lib64/llvm18/lib
 
-# PGO instrument (-fprofile-generate) links libclang_rt.profile. AL2023's compiler-rt
-# ships it, but under a resource-dir path clang-18 does not search (lib64 vs clang's
-# /usr/lib/clang resource dir / per-target layout), so `ld: cannot find
-# libclang_rt.profile-<arch>.a` breaks the PGO build. Symlink it into the exact old-layout
-# path clang looks up, then prove -fprofile-generate links. Only PGO uses this; harmless
-# for the default build. Fails loudly if compiler-rt no longer ships the profile runtime.
+# Prove the PGO instrument runtime works: compile, link, AND RUN a -fprofile-generate
+# binary, then require it emitted a .profraw. Running (not just linking) is essential — a
+# mismatched profile runtime links fine but segfaults on execution, which is exactly how
+# the clang-15-vs-clang-18 bug hid before. Only PGO uses this; harmless for the default
+# build. Fails the image build loudly if compiler-rt18's profile runtime is missing/broken.
 RUN set -eux; \
-    arch="$(uname -m)"; \
-    resdir="$(clang-18 -print-resource-dir)"; \
-    dest="${resdir}/lib/linux"; \
-    target="${dest}/libclang_rt.profile-${arch}.a"; \
-    if [ ! -e "${target}" ]; then \
-      rt="$(find /usr/lib /usr/lib64 -name 'libclang_rt.profile*.a' -print -quit 2>/dev/null || true)"; \
-      test -n "${rt}"; \
-      mkdir -p "${dest}"; \
-      ln -sfn "${rt}" "${target}"; \
-    fi; \
     printf 'int main(void){return 0;}\n' > /tmp/pgo-probe.c; \
     clang-18 -fprofile-generate /tmp/pgo-probe.c -o /tmp/pgo-probe; \
-    rm -f /tmp/pgo-probe /tmp/pgo-probe.c /tmp/*.profraw default_*.profraw 2>/dev/null || true
+    ( cd /tmp && LLVM_PROFILE_FILE=/tmp/pgo-%p.profraw ./pgo-probe ); \
+    test -n "$(ls /tmp/pgo-*.profraw 2>/dev/null)"; \
+    rm -f /tmp/pgo-probe /tmp/pgo-probe.c /tmp/pgo-*.profraw
 
 # CMake pinned to an exact version (do not rely on the distro package).
 RUN set -eux; \
