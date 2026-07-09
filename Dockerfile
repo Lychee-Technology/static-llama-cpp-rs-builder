@@ -38,6 +38,27 @@ ENV CC=clang-18 CXX=clang++-18
 # bindgen (clang-sys) locates libclang here on AL2023 (llvm18 tree, not /usr/lib64).
 ENV LIBCLANG_PATH=/usr/lib64/llvm18/lib
 
+# PGO instrument (-fprofile-generate) links libclang_rt.profile. AL2023's compiler-rt
+# ships it, but under a resource-dir path clang-18 does not search (lib64 vs clang's
+# /usr/lib/clang resource dir / per-target layout), so `ld: cannot find
+# libclang_rt.profile-<arch>.a` breaks the PGO build. Symlink it into the exact old-layout
+# path clang looks up, then prove -fprofile-generate links. Only PGO uses this; harmless
+# for the default build. Fails loudly if compiler-rt no longer ships the profile runtime.
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    resdir="$(clang-18 -print-resource-dir)"; \
+    dest="${resdir}/lib/linux"; \
+    target="${dest}/libclang_rt.profile-${arch}.a"; \
+    if [ ! -e "${target}" ]; then \
+      rt="$(find /usr/lib /usr/lib64 -name 'libclang_rt.profile*.a' -print -quit 2>/dev/null || true)"; \
+      test -n "${rt}"; \
+      mkdir -p "${dest}"; \
+      ln -sfn "${rt}" "${target}"; \
+    fi; \
+    printf 'int main(void){return 0;}\n' > /tmp/pgo-probe.c; \
+    clang-18 -fprofile-generate /tmp/pgo-probe.c -o /tmp/pgo-probe; \
+    rm -f /tmp/pgo-probe /tmp/pgo-probe.c /tmp/*.profraw default_*.profraw 2>/dev/null || true
+
 # CMake pinned to an exact version (do not rely on the distro package).
 RUN set -eux; \
     arch="$(uname -m)"; \
