@@ -105,7 +105,9 @@ additionally the deployed smoke/PGO model:
   `not_generated` and is non-fatal, while §2 and §4 still gate.
 - **Modes & inputs (§3):** both **MEAN** and **LAST** pooling with **NON_CAUSAL** attention
   (LAST is jina's deployment pooling), single-sequence and batched, over diverse query/
-  document inputs including non-ASCII/CJK, each with its jina task prefix.
+  document inputs including non-ASCII/CJK. The jina task prompt is applied per role: the
+  llama.cpp side prepends the literal `Query: `/`Document: `, and the FP32 golden uses
+  sentence-transformers `prompt_name` (which applies the same strings).
 - **Self-consistency (§4):** determinism (identical bytes), batch-invariance, and
   thread-invariance within eps, plus a coarse semantic-sanity check (paraphrase cosine >
   unrelated cosine) that catches a fully collapsed/scrambled space with no external reference.

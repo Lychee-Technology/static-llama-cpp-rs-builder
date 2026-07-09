@@ -48,9 +48,11 @@ fn env_or_fail(key: &str) -> String {
 // ---- fixture parsing --------------------------------------------------------------
 
 // jina-embeddings-v5 retrieval task prefixes (exact strings from the model's
-// config_sentence_transformers.json "prompts"). Both this harness and the FP32 golden
-// generator (scripts/gen-golden.py) prepend the SAME literal string per role, so the
-// parity check compares byte-identical inputs on both sides.
+// config_sentence_transformers.json "prompts"). llama.cpp has no prompt concept, so THIS
+// (llama.cpp) side prepends the literal prefix per role before tokenizing. The FP32 golden
+// side (scripts/gen-golden.py) does NOT prefix by hand — it passes prompt_name=role to
+// sentence-transformers, which applies these exact strings. Same effective input, so the
+// parity comparison is valid.
 const QUERY_PREFIX: &str = "Query: ";
 const DOCUMENT_PREFIX: &str = "Document: ";
 

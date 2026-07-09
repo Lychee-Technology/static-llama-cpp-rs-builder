@@ -2,9 +2,11 @@
 # Format: id<TAB>role<TAB>group<TAB>text   ('#' = comment; role = query | document)
 #
 # The retrieval model uses task prefixes: role "query" -> "Query: ", "document" ->
-# "Document: " (exact strings from the model's config_sentence_transformers.json). BOTH
-# this harness and scripts/gen-golden.py prepend the SAME literal prefix, so the FP32
-# parity check compares byte-identical inputs.
+# "Document: " (exact strings from the model's config_sentence_transformers.json). The
+# llama.cpp side (correctness crate) prepends the literal prefix before tokenizing; the
+# FP32 golden side (scripts/gen-golden.py) does NOT prefix by hand — it uses
+# sentence-transformers prompt_name=role, which applies the same strings. Equivalent input
+# on both sides -> valid parity.
 #
 # Consumed by the `correctness` crate:
 #  - emit/compare use EVERY row (each x MEAN and LAST pooling; jina's deployment pooling

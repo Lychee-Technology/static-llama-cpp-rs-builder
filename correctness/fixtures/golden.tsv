@@ -3,8 +3,9 @@
 #
 # Produced OFFLINE by scripts/gen-golden.py: the FP32 PyTorch model
 # jina-embeddings-v5-text-nano-retrieval loaded via sentence-transformers (torch_dtype=
-# float32), encoding each input with its jina task prefix ("Query: " / "Document: "),
-# L2-normalized, dim 768. This is fully independent of the GGUF/llama.cpp path, so the
+# float32), encoding each input with prompt_name=role (query/document — the model applies
+# its own "Query: "/"Document: " prompt; text is NOT prefixed by hand), L2-normalized,
+# dim 768. This is fully independent of the GGUF/llama.cpp path, so the
 # parity check is not circular — it directly mirrors the downstream GGUF-vs-PyTorch-FP32
 # benchmark that first caught v0.1.151-1.
 #

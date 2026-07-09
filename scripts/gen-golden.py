@@ -3,8 +3,10 @@
 
 Run OFFLINE (by a maintainer), NOT in CI. Loads the FP32 PyTorch model
 jina-embeddings-v5-text-nano-retrieval via sentence-transformers and encodes each row of
-inputs.tsv with its jina task prefix ("Query: " / "Document: "), last-token pooling,
-L2-normalized, dim 768. This is independent of the GGUF/llama.cpp path, so the parity
+inputs.tsv with `prompt_name=role` (query/document) — the sentence-transformers way; the
+model applies its own "Query: "/"Document: " prompt, so we do NOT prefix text by hand
+(the llama.cpp side does that instead). Last-token pooling, L2-normalized, dim 768. This
+is independent of the GGUF/llama.cpp path, so the parity
 check scripts/correctness.sh runs (IQ4_NL GGUF vs this golden, cosine >= 0.98) is not
 circular — it mirrors the downstream GGUF-vs-PyTorch-FP32 benchmark that caught v0.1.151-1.
 
@@ -72,7 +74,10 @@ def main():
 
     lines = []
     for rid, role, text in rows:
-        # prompt_name applies the SAME "Query: "/"Document: " prefix the crate prepends.
+        # sentence-transformers: pass RAW text + prompt_name (do NOT manually prefix).
+        # prompt_name=role makes the model apply its own "Query: "/"Document: " prompt,
+        # matching what the llama.cpp side prepends literally. Manual-prefixing here would
+        # double it.
         emb = model.encode(
             text, prompt_name=role, normalize_embeddings=True, convert_to_numpy=True
         )
