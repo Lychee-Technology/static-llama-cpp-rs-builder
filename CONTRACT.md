@@ -97,12 +97,24 @@ additionally the deployed smoke/PGO model:
   `-march=armv8-a` (scalar/generic kernels) on the *same host*; the tuned archives must
   match it at **cosine ≥ 0.999**. Any divergence is purely the tuning/codegen flags — the
   `v0.1.151-1` failure class.
-- **FP32 golden parity (§1):** cosine **≥ 0.98** (IQ4_NL quant vs FP32) between the packaged
-  archives' embeddings and committed golden vectors produced offline by the **FP32 PyTorch**
-  model via sentence-transformers (`scripts/gen-golden.py` → `correctness/fixtures/golden.tsv`).
+- **FP32 golden parity (§1):** cosine **≥ 0.98** between the packaged archives' embeddings
+  and committed golden vectors produced offline by the **FP32 PyTorch** model via
+  sentence-transformers (`scripts/gen-golden.py` → `correctness/fixtures/golden.tsv`).
   Independent of the GGUF/llama.cpp path — it mirrors the downstream GGUF-vs-FP32 benchmark
   that caught `v0.1.151-1`. Until that file has data rows the golden check is recorded as
   `not_generated` and is non-fatal, while §2 and §4 still gate.
+  - **Threshold justification (0.98, vs issue #4's 0.99):** the deployed/reference GGUF is
+    **IQ4_NL — a 4-bit quantization**, so `cosine(IQ4_NL, FP32)` is floored by quantization
+    error, not runtime error (measured worst input `0.9845`; issue #4's `0.99` assumed a
+    higher-fidelity quant). That the gap is *quantization* and not a codegen fault is proven
+    on the same run by §2 (tuned-vs-generic `0.99981` — the two builds agree) and by the
+    `v0.1.151-1` garbage being `~0.31` — so `0.98` rejects that failure class with ~0.67
+    margin while not false-failing on legitimate 4-bit quantization.
+  - **Coverage of the deployed model:** `scripts/correctness.sh` **requires the deployed
+    `SMOKE_MODEL` to be byte-identical (sha256) to the pinned golden reference GGUF**, so the
+    single golden comparison authoritatively covers the deployed model — a bug specific to
+    the deployed model cannot ship golden-unchecked. Deploying a different quant requires a
+    golden for it.
 - **Modes & inputs (§3):** both **MEAN** and **LAST** pooling with **NON_CAUSAL** attention
   (LAST is jina's deployment pooling), single-sequence and batched, over diverse query/
   document inputs including non-ASCII/CJK. The jina task prompt is applied per role: the

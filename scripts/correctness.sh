@@ -38,7 +38,7 @@ REF_MODEL="${ROOT}/.build/correctness-ref-model.gguf"
 
 # Thresholds.
 TUNED_GENERIC_MIN_COS="${TUNED_GENERIC_MIN_COS:-0.999}"   # §2 tuned vs generic (same host)
-GOLDEN_MIN_COS="${GOLDEN_MIN_COS:-0.98}"                   # §1 IQ4_NL GGUF vs FP32 golden
+GOLDEN_MIN_COS="${GOLDEN_MIN_COS:-0.98}"                   # §1 IQ4_NL(4-bit) vs FP32 — justified in CONTRACT.md
 HW_COVERAGE="neoverse-n2 only; graviton2/n1 not yet gated"
 
 mkdir -p "${RESULTS}" "${GENERIC_DIST}/lib"
@@ -100,6 +100,23 @@ E_GEN_SMK="${RESULTS}/emit.smoke.generic.tsv"
 
 HAVE_SMOKE=0
 [[ -n "${SMOKE_MODEL:-}" && -f "${SMOKE_MODEL:-}" ]] && HAVE_SMOKE=1
+
+# The FP32 golden (§1) is tied to the pinned reference model. To guarantee golden parity
+# ALSO covers the DEPLOYED model (issue #4), require the deployed SMOKE_MODEL to be
+# byte-identical to the reference GGUF — then the reference-vs-golden check authoritatively
+# covers the deployed model too (no bug specific to SMOKE_MODEL can ship unchecked). For
+# jina nano, reference == deployed == IQ4_NL. If you deploy a different quant, either pin
+# SMOKE_MODEL to the reference GGUF, or generate a golden for the deployed model.
+if [[ "${HAVE_SMOKE}" == 1 ]]; then
+  SMK_SHA="$(sha256sum "${SMOKE_MODEL}" | awk '{print $1}')"
+  if [[ "${SMK_SHA}" != "${CORRECTNESS_MODEL_SHA256}" ]]; then
+    echo "[correct] FAIL: deployed SMOKE_MODEL sha ${SMK_SHA} != golden reference sha ${CORRECTNESS_MODEL_SHA256}." >&2
+    echo "[correct]   The FP32 golden covers the reference model; the deployed model would ship golden-unchecked." >&2
+    echo "[correct]   Pin SMOKE_MODEL to correctness/fixtures/reference-model.env's GGUF, or add a deployed golden." >&2
+    exit 1
+  fi
+  log "deployed SMOKE_MODEL == golden reference (sha ${SMK_SHA:0:12}…) — golden covers the deployed model"
+fi
 
 # Emit + selfcheck against the TUNED archives first (all STATIC_LLAMA_DIR=dist).
 log "emit/selfcheck against tuned dist/"

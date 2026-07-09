@@ -255,7 +255,7 @@ jq -n \
   --arg image         "${COMPILER_IMAGE:-amazonlinux:2023 (unrecorded)}" \
   --arg cc            "$(${CC:-cc} --version | head -n1)" \
   --arg cxx           "$(${CXX:-c++} --version | head -n1)" \
-  --arg pkgs          "$(command -v rpm >/dev/null && rpm -q glibc libstdc++ gcc clang18 llvm18-libs 2>/dev/null | tr '\n' ';' || echo 'rpm-unavailable')" \
+  --arg pkgs          "$(command -v rpm >/dev/null && rpm -q glibc libstdc++ gcc clang18 llvm18-libs compiler-rt18 2>/dev/null | tr '\n' ';' || echo 'rpm-unavailable')" \
   --arg triple        "${TARGET_TRIPLE}" \
   --arg cpu           "${CPU_MTUNE}" \
   --arg flags         "${EFFECTIVE_FLAGS}" \

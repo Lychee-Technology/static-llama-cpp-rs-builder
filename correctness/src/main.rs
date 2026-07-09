@@ -18,13 +18,20 @@
 //!              space collapsed/scrambled" even with no external reference. Writes
 //!              $CORRECTNESS_RESULT.
 //!
-//!   compare    Pure (no llama): read two emit files (A, B) and require cosine >=
-//!              $CORRECTNESS_THRESHOLD for every shared label. Writes $CORRECTNESS_RESULT.
+//!   compare    Pure (no llama): read two emit files A (packaged-archive emit) and B (the
+//!              reference: generic emit or the golden), require cosine >=
+//!              $CORRECTNESS_THRESHOLD for every B label, and FAIL if any B label is
+//!              missing from A. Writes $CORRECTNESS_RESULT.
 //!
-//! Inputs fixture path: $CORRECTNESS_INPUTS (TSV: `id<TAB>group<TAB>text`, `#` comments).
+//! Inputs fixture path: $CORRECTNESS_INPUTS (TSV: `id<TAB>role<TAB>group<TAB>text`, `#` comments).
 //! Also prints llama_print_system_info() so compiled-in CPU features sit next to numbers.
 
-#![allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code)]
+#![allow(
+    non_upper_case_globals,
+    non_camel_case_types,
+    non_snake_case,
+    dead_code
+)]
 
 mod llama {
     include!(env!("STATIC_LLAMA_BINDINGS"));
@@ -69,7 +76,10 @@ impl Input {
         let p = match self.role.as_str() {
             "query" => QUERY_PREFIX,
             "document" => DOCUMENT_PREFIX,
-            other => fail(&format!("input {:?}: role must be query|document, got {other:?}", self.id)),
+            other => fail(&format!(
+                "input {:?}: role must be query|document, got {other:?}",
+                self.id
+            )),
         };
         format!("{p}{}", self.text)
     }
@@ -97,7 +107,9 @@ fn load_inputs() -> Vec<Input> {
                     text: text.to_string(),
                 });
             }
-            _ => fail(&format!("malformed inputs line (need id<TAB>role<TAB>group<TAB>text): {line:?}")),
+            _ => fail(&format!(
+                "malformed inputs line (need id<TAB>role<TAB>group<TAB>text): {line:?}"
+            )),
         }
     }
     if out.is_empty() {
@@ -127,7 +139,10 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max)
 }
 
 // ---- llama wrapper ----------------------------------------------------------------
@@ -144,14 +159,20 @@ impl Engine {
         let mparams = llama::llama_model_default_params();
         let model = llama::llama_model_load_from_file(c_model.as_ptr(), mparams);
         if model.is_null() {
-            fail(&format!("llama_model_load_from_file returned null for {model_path}"));
+            fail(&format!(
+                "llama_model_load_from_file returned null for {model_path}"
+            ));
         }
         let vocab = llama::llama_model_get_vocab(model);
         let n_embd = llama::llama_model_n_embd(model);
         if n_embd <= 0 {
             fail("model reports n_embd <= 0");
         }
-        Engine { model, vocab, n_embd: n_embd as usize }
+        Engine {
+            model,
+            vocab,
+            n_embd: n_embd as usize,
+        }
     }
 
     unsafe fn tokenize(&self, text: &str) -> Vec<i32> {
@@ -229,7 +250,9 @@ impl Engine {
             llama::llama_batch_free(batch);
             fail("llama_encode failed for batched input");
         }
-        let out = (0..texts.len()).map(|s| self.read_seq(ctx, s as i32)).collect();
+        let out = (0..texts.len())
+            .map(|s| self.read_seq(ctx, s as i32))
+            .collect();
         llama::llama_batch_free(batch);
         out
     }
@@ -237,11 +260,15 @@ impl Engine {
     unsafe fn read_seq(&self, ctx: *mut llama::llama_context, seq: i32) -> Vec<f32> {
         let emb = llama::llama_get_embeddings_seq(ctx, seq);
         if emb.is_null() {
-            fail(&format!("llama_get_embeddings_seq returned null (seq {seq})"));
+            fail(&format!(
+                "llama_get_embeddings_seq returned null (seq {seq})"
+            ));
         }
         let slice = std::slice::from_raw_parts(emb, self.n_embd);
         if !slice.iter().all(|v| v.is_finite()) {
-            fail(&format!("embedding for seq {seq} contains non-finite values"));
+            fail(&format!(
+                "embedding for seq {seq} contains non-finite values"
+            ));
         }
         slice.to_vec()
     }
@@ -259,9 +286,14 @@ unsafe fn group_pair_cosine(
     inputs: &[Input],
     prefix: &str,
 ) -> f32 {
-    let members: Vec<&Input> = inputs.iter().filter(|i| i.group.starts_with(prefix)).collect();
+    let members: Vec<&Input> = inputs
+        .iter()
+        .filter(|i| i.group.starts_with(prefix))
+        .collect();
     if members.len() < 2 {
-        fail(&format!("need >=2 inputs in a '{prefix}*' group for semantic sanity"));
+        fail(&format!(
+            "need >=2 inputs in a '{prefix}*' group for semantic sanity"
+        ));
     }
     let a = eng.embed_single(ctx, &members[0].prefixed());
     let b = eng.embed_single(ctx, &members[1].prefixed());
@@ -271,7 +303,10 @@ unsafe fn group_pair_cosine(
 unsafe fn print_sysinfo() {
     let s = llama::llama_print_system_info();
     if !s.is_null() {
-        println!("[correctness] system info: {}", CStr::from_ptr(s).to_string_lossy());
+        println!(
+            "[correctness] system info: {}",
+            CStr::from_ptr(s).to_string_lossy()
+        );
     }
 }
 
@@ -312,7 +347,10 @@ fn mode_emit() {
         llama::llama_backend_free();
     }
     std::fs::write(&out_path, out).unwrap_or_else(|e| fail(&format!("write {out_path}: {e}")));
-    eprintln!("[correctness] emit wrote {out_path} ({n_inputs} inputs x {} poolings)", POOLINGS.len());
+    eprintln!(
+        "[correctness] emit wrote {out_path} ({n_inputs} inputs x {} poolings)",
+        POOLINGS.len()
+    );
 }
 
 // ---- selfcheck --------------------------------------------------------------------
@@ -362,9 +400,19 @@ fn mode_selfcheck() {
         llama::llama_free(ctx);
 
         // --- thread-invariance: n_threads=1 vs N ------------------------------------
-        let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) as i32;
-        let ctx1 = eng.context(llama::LLAMA_POOLING_TYPE_LAST, llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL, 1);
-        let ctxn = eng.context(llama::LLAMA_POOLING_TYPE_LAST, llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL, nproc.max(1));
+        let nproc = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2) as i32;
+        let ctx1 = eng.context(
+            llama::LLAMA_POOLING_TYPE_LAST,
+            llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL,
+            1,
+        );
+        let ctxn = eng.context(
+            llama::LLAMA_POOLING_TYPE_LAST,
+            llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL,
+            nproc.max(1),
+        );
         let mut thread_cos_min = 1.0f32;
         let mut thread_diff_max = 0.0f32;
         for t in &text_refs {
@@ -378,7 +426,11 @@ fn mode_selfcheck() {
 
         // --- semantic sanity: paraphrase cosine > unrelated cosine ------------------
         // groups whose id starts "para" are positive pairs; "unrel" are negative pairs.
-        let ctx = eng.context(llama::LLAMA_POOLING_TYPE_LAST, llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL, 0);
+        let ctx = eng.context(
+            llama::LLAMA_POOLING_TYPE_LAST,
+            llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL,
+            0,
+        );
         let para_cos = group_pair_cosine(&eng, ctx, &inputs, "para");
         let unrel_cos = group_pair_cosine(&eng, ctx, &inputs, "unrel");
         llama::llama_free(ctx);
@@ -412,8 +464,7 @@ thread(min_cos={thread_cos_min:.5}) semantic(para={para_cos:.4} unrel={unrel_cos
 // ---- compare ----------------------------------------------------------------------
 
 fn read_emit(path: &str) -> Vec<(String, Vec<f32>)> {
-    let body =
-        std::fs::read_to_string(path).unwrap_or_else(|e| fail(&format!("read {path}: {e}")));
+    let body = std::fs::read_to_string(path).unwrap_or_else(|e| fail(&format!("read {path}: {e}")));
     let mut out = Vec::new();
     for line in body.lines() {
         if line.trim().is_empty() || line.trim_start().starts_with('#') {
@@ -427,7 +478,11 @@ fn read_emit(path: &str) -> Vec<(String, Vec<f32>)> {
         }
         let v: Vec<f32> = csv
             .split(',')
-            .map(|s| s.trim().parse::<f32>().unwrap_or_else(|_| fail(&format!("bad float in {path}: {s:?}"))))
+            .map(|s| {
+                s.trim()
+                    .parse::<f32>()
+                    .unwrap_or_else(|_| fail(&format!("bad float in {path}: {s:?}")))
+            })
             .collect();
         out.push((label, v));
     }
@@ -442,18 +497,31 @@ fn mode_compare() {
         .parse()
         .unwrap_or_else(|_| fail("CORRECTNESS_THRESHOLD not a float"));
 
-    let a = read_emit(&a_path);
-    let b: std::collections::HashMap<String, Vec<f32>> = read_emit(&b_path).into_iter().collect();
+    // A = the packaged-archive emit (superset: every input x MEAN and LAST). B = the
+    // REFERENCE side (generic emit, or the golden). Every reference label MUST be present
+    // in A and matched — a reference/golden label missing from the emit is a hard failure
+    // (a stale/incomplete golden, or an emit missing a pooling/input, must never pass by
+    // being silently skipped).
+    let a: std::collections::HashMap<String, Vec<f32>> = read_emit(&a_path).into_iter().collect();
+    let b = read_emit(&b_path);
 
     let mut min_cosine = 1.0f32;
     let mut worst_label = String::new();
     let mut n = 0usize;
     let mut per_label = String::new();
-    for (label, va) in &a {
-        let Some(vb) = b.get(label) else { continue };
+    let mut missing: Vec<String> = Vec::new();
+    for (label, vb) in &b {
+        let Some(va) = a.get(label) else {
+            missing.push(label.clone());
+            continue;
+        };
         let c = cosine(va, vb);
         if c.is_nan() {
-            fail(&format!("cosine NaN for label {label:?} (len {} vs {})", va.len(), vb.len()));
+            fail(&format!(
+                "cosine NaN for label {label:?} (len {} vs {})",
+                va.len(),
+                vb.len()
+            ));
         }
         if !per_label.is_empty() {
             per_label.push(',');
@@ -465,8 +533,17 @@ fn mode_compare() {
         }
         n += 1;
     }
+    if !missing.is_empty() {
+        fail(&format!(
+            "{} reference label(s) in {b_path} absent from emit {a_path}: {}",
+            missing.len(),
+            missing.join(", ")
+        ));
+    }
     if n == 0 {
-        fail(&format!("no shared labels between {a_path} and {b_path}"));
+        fail(&format!(
+            "no labels to compare between {a_path} and {b_path}"
+        ));
     }
     let passed = min_cosine >= threshold;
     let json = format!(
@@ -488,6 +565,8 @@ fn main() {
         "emit" => mode_emit(),
         "selfcheck" => mode_selfcheck(),
         "compare" => mode_compare(),
-        other => fail(&format!("unknown $CORRECTNESS_MODE {other:?} (emit|selfcheck|compare)")),
+        other => fail(&format!(
+            "unknown $CORRECTNESS_MODE {other:?} (emit|selfcheck|compare)"
+        )),
     }
 }
