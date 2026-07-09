@@ -88,20 +88,24 @@ LICENSES/       llama.cpp, ggml, and builder licenses (all MIT)
 
 A release fails unless the packaged archives compute the *right* embeddings — not merely
 finite/fast ones. `scripts/correctness.sh` runs on the release runner and records a
-`correctness` block in `build-info.json`. It checks, against a pinned reference model and
+`correctness` block in `build-info.json`. The target model is
+**jina-embeddings-v5-text-nano-retrieval** (EuroBERT-210m, **last-token pooling**, dim 768,
+task prefixes `Query: `/`Document: `). Checks run against a pinned reference GGUF and
 additionally the deployed smoke/PGO model:
 
 - **Tuned-vs-generic parity (§2):** a second archive set built from source with generic
   `-march=armv8-a` (scalar/generic kernels) on the *same host*; the tuned archives must
   match it at **cosine ≥ 0.999**. Any divergence is purely the tuning/codegen flags — the
   `v0.1.151-1` failure class.
-- **Golden parity (§1):** cosine **≥ 0.99** vs committed golden vectors produced offline by
-  the upstream `llama-embedding` binary at the pinned commit with generic flags
-  (`correctness/fixtures/golden.tsv`, regenerated via `scripts/gen-golden.sh`). Until that
-  file has data rows the golden check is recorded as `not_generated` and is non-fatal, while
-  §2 and §4 still gate.
-- **Modes & inputs (§3):** both **MEAN** and **LAST** pooling with **NON_CAUSAL** attention,
-  single-sequence and batched, over diverse inputs including non-ASCII/CJK.
+- **FP32 golden parity (§1):** cosine **≥ 0.98** (IQ4_NL quant vs FP32) between the packaged
+  archives' embeddings and committed golden vectors produced offline by the **FP32 PyTorch**
+  model via sentence-transformers (`scripts/gen-golden.py` → `correctness/fixtures/golden.tsv`).
+  Independent of the GGUF/llama.cpp path — it mirrors the downstream GGUF-vs-FP32 benchmark
+  that caught `v0.1.151-1`. Until that file has data rows the golden check is recorded as
+  `not_generated` and is non-fatal, while §2 and §4 still gate.
+- **Modes & inputs (§3):** both **MEAN** and **LAST** pooling with **NON_CAUSAL** attention
+  (LAST is jina's deployment pooling), single-sequence and batched, over diverse query/
+  document inputs including non-ASCII/CJK, each with its jina task prefix.
 - **Self-consistency (§4):** determinism (identical bytes), batch-invariance, and
   thread-invariance within eps, plus a coarse semantic-sanity check (paraphrase cosine >
   unrelated cosine) that catches a fully collapsed/scrambled space with no external reference.

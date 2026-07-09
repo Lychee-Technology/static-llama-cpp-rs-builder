@@ -1,19 +1,23 @@
 # GOLDEN reference embeddings (§1) — line format: label<TAB>f0,f1,...  where label is
-# "<input-id>|<pooling>" (matching the `correctness` crate's emit output).
+# "<input-id>|last" (jina-embeddings-v5 uses last-token pooling; the golden covers LAST).
 #
-# These are produced OFFLINE, once, by the upstream official `llama-embedding` binary
-# built from the pinned llama.cpp commit with GENERIC flags — an implementation
-# independent of the tuned archives this repo ships, so the parity check is not circular.
-# Regenerate with scripts/gen-golden.sh whenever the reference model (reference-model.env)
-# or the pinned llama.cpp commit (scripts/config.env EXPECTED_LLAMA_CPP_COMMIT) changes.
+# Produced OFFLINE by scripts/gen-golden.py: the FP32 PyTorch model
+# jina-embeddings-v5-text-nano-retrieval loaded via sentence-transformers (torch_dtype=
+# float32), encoding each input with its jina task prefix ("Query: " / "Document: "),
+# L2-normalized, dim 768. This is fully independent of the GGUF/llama.cpp path, so the
+# parity check is not circular — it directly mirrors the downstream GGUF-vs-PyTorch-FP32
+# benchmark that first caught v0.1.151-1.
 #
-# Provenance (fill in when generating):
-#   llama.cpp commit : 9e3b928fd8c9d14dbf15a8768b9fdd7e5c721d66  (describe: b9553)
-#   reference model  : bge-small-en-v1.5-q8_0.gguf  sha256 <fill-in>
-#   build flags      : -O3 -march=armv8-a  (generic; no dotprod/fp16/mtune)
-#   tool             : llama-embedding --pooling {mean,last} --embd-normalize 2
+# Regenerate with scripts/gen-golden.py whenever inputs.tsv, the reference GGUF, or the
+# golden model revision (reference-model.env) changes.
+#
+# Provenance (filled by gen-golden.py):
+#   golden model : jinaai/jina-embeddings-v5-text-nano-retrieval  rev <fill-in>
+#   dtype/dim    : float32 / 768,  pooling: last,  normalize: L2
+#   prefixes     : query="Query: "  document="Document: "
+#   compared to  : v5-nano-retrieval-IQ4_NL.gguf  (threshold cosine >= 0.98, quant vs FP32)
 #
 # UNTIL this file has data rows, scripts/correctness.sh treats §1 golden parity as
 # "not_generated": it logs a warning and records it in build-info.json, while the §2
 # tuned-vs-generic and §4 self-consistency checks remain HARD release gates. Run
-# scripts/gen-golden.sh and commit the result to activate the golden gate.
+# scripts/gen-golden.py and commit the result to activate the golden gate.

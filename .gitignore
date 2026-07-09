@@ -3,3 +3,5 @@
 /target/
 **/target/
 smoke/fixtures/model.gguf
+__pycache__/
+*.pyc

@@ -9,9 +9,12 @@
 #                        generic kernels) on the SAME host and require cosine >= 0.999 vs
 #                        the tuned dist/. Divergence is purely the tuning/codegen flags —
 #                        exactly the v0.1.151-1 failure class. No external reference.
-#   §1 golden parity     Require cosine >= 0.99 vs committed golden vectors produced
-#                        offline by the upstream llama-embedding binary (generic flags).
-#                        Skipped (recorded, non-fatal) until golden.tsv has data rows.
+#   §1 golden parity     Require cosine >= 0.98 vs committed FP32 golden vectors produced
+#                        offline by scripts/gen-golden.py (the PyTorch model via
+#                        sentence-transformers) — independent of the GGUF/llama.cpp path,
+#                        mirroring the downstream GGUF-vs-FP32 benchmark. IQ4_NL vs FP32,
+#                        so the threshold allows quantization error. Skipped (recorded,
+#                        non-fatal) until golden.tsv has data rows.
 #   §4 self-consistency  Determinism / batch-invariance / thread-invariance / semantic
 #                        sanity on the tuned build (reference-free).
 #
@@ -35,7 +38,7 @@ REF_MODEL="${ROOT}/.build/correctness-ref-model.gguf"
 
 # Thresholds.
 TUNED_GENERIC_MIN_COS="${TUNED_GENERIC_MIN_COS:-0.999}"   # §2 tuned vs generic (same host)
-GOLDEN_MIN_COS="${GOLDEN_MIN_COS:-0.99}"                   # §1 vs independent golden
+GOLDEN_MIN_COS="${GOLDEN_MIN_COS:-0.98}"                   # §1 IQ4_NL GGUF vs FP32 golden
 HW_COVERAGE="neoverse-n2 only; graviton2/n1 not yet gated"
 
 mkdir -p "${RESULTS}" "${GENERIC_DIST}/lib"

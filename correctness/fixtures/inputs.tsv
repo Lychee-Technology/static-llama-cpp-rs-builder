@@ -1,20 +1,27 @@
-# Diverse embedding-correctness inputs. Format: id<TAB>group<TAB>text  ('#' = comment).
+# Embedding-correctness inputs for jina-embeddings-v5-text-nano-retrieval.
+# Format: id<TAB>role<TAB>group<TAB>text   ('#' = comment; role = query | document)
+#
+# The retrieval model uses task prefixes: role "query" -> "Query: ", "document" ->
+# "Document: " (exact strings from the model's config_sentence_transformers.json). BOTH
+# this harness and scripts/gen-golden.py prepend the SAME literal prefix, so the FP32
+# parity check compares byte-identical inputs.
 #
 # Consumed by the `correctness` crate:
-#  - emit/compare use EVERY row (each x MEAN and LAST pooling).
-#  - selfcheck's semantic-sanity uses the `para*` rows as a paraphrase (positive) pair
-#    and the `unrel*` rows as an unrelated (negative) pair: para cosine must exceed
-#    unrel cosine. Keep >=2 rows in a `para*` group and >=2 in an `unrel*` group.
+#  - emit/compare use EVERY row (each x MEAN and LAST pooling; jina's deployment pooling
+#    is LAST, so the golden compares LAST).
+#  - selfcheck's semantic-sanity uses the `para*` rows as a paraphrase (positive) pair and
+#    the `unrel*` rows as an unrelated (negative) pair.
 #
-# Cover short/long, ASCII and non-ASCII/CJK so a scrambled forward pass can't pass by luck.
-short_en	general	hello from graviton2
-long_en	general	The quick brown fox jumps over the lazy dog near the riverbank at dawn while the fishermen prepare their nets.
-question_en	general	What is the capital of France, and what is it best known for?
-cjk_zh	general	北京是中国的首都，也是重要的政治、文化与科技创新中心。
-cjk_ja	general	東京は日本の首都であり、世界有数の人口を抱える大都市圏です。
-mixed	general	The GGUF model runs on Graviton2 (Neoverse-N1) 使用 dotprod 指令集加速推理。
-digits	general	Order 4471 shipped 2026-01-15 with 3 units at $19.99 each, total $59.97.
-para1_a	para1	A small cat is sleeping on the warm windowsill in the afternoon sun.
-para1_b	para1	In the afternoon sunlight, a little kitten naps on the warm ledge by the window.
-unrel1_a	unrel1	A small cat is sleeping on the warm windowsill in the afternoon sun.
-unrel1_b	unrel1	Quarterly cloud-infrastructure revenue exceeded analyst expectations by twelve percent.
+# EuroBERT-210m backbone is multilingual — cover queries/documents, ASCII and CJK, short/long.
+q_graviton	query	general	How is embedding inference accelerated on AWS Graviton2 CPUs?
+q_capital_fr	query	general	Quelle est la capitale de la France et pour quoi est-elle connue ?
+q_cjk	query	general	北京有哪些著名的科技与文化地标？
+d_long	document	general	The quick brown fox jumps over the lazy dog near the riverbank at dawn while the fishermen quietly prepare their nets for the morning catch.
+d_cjk_zh	document	general	北京是中国的首都，也是重要的政治、文化与科技创新中心。
+d_cjk_ja	document	general	東京は日本の首都であり、世界有数の人口を抱える大都市圏です。
+d_mixed	document	general	The GGUF model runs on Graviton2 (Neoverse-N1) 使用 dotprod 指令集加速推理。
+d_digits	document	general	Order 4471 shipped 2026-01-15 with 3 units at $19.99 each, total $59.97.
+para1_a	document	para1	A small cat is sleeping on the warm windowsill in the afternoon sun.
+para1_b	document	para1	In the afternoon sunlight, a little kitten naps on the warm ledge by the window.
+unrel1_a	document	unrel1	A small cat is sleeping on the warm windowsill in the afternoon sun.
+unrel1_b	document	unrel1	Quarterly cloud-infrastructure revenue exceeded analyst expectations by twelve percent.

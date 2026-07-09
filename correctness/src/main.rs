@@ -47,10 +47,30 @@ fn env_or_fail(key: &str) -> String {
 
 // ---- fixture parsing --------------------------------------------------------------
 
+// jina-embeddings-v5 retrieval task prefixes (exact strings from the model's
+// config_sentence_transformers.json "prompts"). Both this harness and the FP32 golden
+// generator (scripts/gen-golden.py) prepend the SAME literal string per role, so the
+// parity check compares byte-identical inputs on both sides.
+const QUERY_PREFIX: &str = "Query: ";
+const DOCUMENT_PREFIX: &str = "Document: ";
+
 struct Input {
     id: String,
+    role: String, // "query" | "document" (selects the task prefix)
     group: String,
     text: String,
+}
+
+impl Input {
+    // The exact string fed to the model: task prefix + text.
+    fn prefixed(&self) -> String {
+        let p = match self.role.as_str() {
+            "query" => QUERY_PREFIX,
+            "document" => DOCUMENT_PREFIX,
+            other => fail(&format!("input {:?}: role must be query|document, got {other:?}", self.id)),
+        };
+        format!("{p}{}", self.text)
+    }
 }
 
 fn load_inputs() -> Vec<Input> {
@@ -63,17 +83,19 @@ fn load_inputs() -> Vec<Input> {
         if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
-        let mut it = line.splitn(3, '\t');
-        let (id, group, text) = (it.next(), it.next(), it.next());
-        match (id, group, text) {
-            (Some(id), Some(group), Some(text)) if !id.is_empty() && !text.is_empty() => {
+        let mut it = line.splitn(4, '\t');
+        match (it.next(), it.next(), it.next(), it.next()) {
+            (Some(id), Some(role), Some(group), Some(text))
+                if !id.is_empty() && !role.is_empty() && !text.is_empty() =>
+            {
                 out.push(Input {
                     id: id.to_string(),
+                    role: role.to_string(),
                     group: group.to_string(),
                     text: text.to_string(),
                 });
             }
-            _ => fail(&format!("malformed inputs line (need id<TAB>group<TAB>text): {line:?}")),
+            _ => fail(&format!("malformed inputs line (need id<TAB>role<TAB>group<TAB>text): {line:?}")),
         }
     }
     if out.is_empty() {
@@ -239,8 +261,8 @@ unsafe fn group_pair_cosine(
     if members.len() < 2 {
         fail(&format!("need >=2 inputs in a '{prefix}*' group for semantic sanity"));
     }
-    let a = eng.embed_single(ctx, &members[0].text);
-    let b = eng.embed_single(ctx, &members[1].text);
+    let a = eng.embed_single(ctx, &members[0].prefixed());
+    let b = eng.embed_single(ctx, &members[1].prefixed());
     cosine(&a, &b)
 }
 
@@ -272,7 +294,7 @@ fn mode_emit() {
         for &(pname, pool) in POOLINGS {
             let ctx = eng.context(pool, llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL, 0);
             for inp in &inputs {
-                let v = eng.embed_single(ctx, &inp.text);
+                let v = eng.embed_single(ctx, &inp.prefixed());
                 out.push_str(&format!("{}|{}\t", inp.id, pname));
                 for (k, x) in v.iter().enumerate() {
                     if k > 0 {
@@ -307,22 +329,26 @@ fn mode_selfcheck() {
         print_sysinfo();
         let eng = Engine::load(&model);
 
+        // All invariants run on the deployment path: LAST pooling + NON_CAUSAL (EuroBERT
+        // encoder), with the jina task prefix prepended to every input.
+        let texts: Vec<String> = inputs.iter().map(|i| i.prefixed()).collect();
+        let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+
         // --- determinism: same input encoded twice -> identical bytes ---------------
         let ctx = eng.context(
-            llama::LLAMA_POOLING_TYPE_MEAN,
+            llama::LLAMA_POOLING_TYPE_LAST,
             llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL,
             0,
         );
-        let d1 = eng.embed_single(ctx, &inputs[0].text);
-        let d2 = eng.embed_single(ctx, &inputs[0].text);
+        let d1 = eng.embed_single(ctx, text_refs[0]);
+        let d2 = eng.embed_single(ctx, text_refs[0]);
         let determinism = d1 == d2; // exact bitwise equality
 
         // --- batch-invariance: batched vs per-sequence ------------------------------
-        let texts: Vec<&str> = inputs.iter().map(|i| i.text.as_str()).collect();
-        let batched = eng.embed_batch(ctx, &texts);
+        let batched = eng.embed_batch(ctx, &text_refs);
         let mut batch_cos_min = 1.0f32;
         let mut batch_diff_max = 0.0f32;
-        for (k, t) in texts.iter().enumerate() {
+        for (k, t) in text_refs.iter().enumerate() {
             let single = eng.embed_single(ctx, t);
             batch_cos_min = batch_cos_min.min(cosine(&single, &batched[k]));
             batch_diff_max = batch_diff_max.max(max_abs_diff(&single, &batched[k]));
@@ -331,11 +357,11 @@ fn mode_selfcheck() {
 
         // --- thread-invariance: n_threads=1 vs N ------------------------------------
         let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) as i32;
-        let ctx1 = eng.context(llama::LLAMA_POOLING_TYPE_MEAN, llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL, 1);
-        let ctxn = eng.context(llama::LLAMA_POOLING_TYPE_MEAN, llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL, nproc.max(1));
+        let ctx1 = eng.context(llama::LLAMA_POOLING_TYPE_LAST, llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL, 1);
+        let ctxn = eng.context(llama::LLAMA_POOLING_TYPE_LAST, llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL, nproc.max(1));
         let mut thread_cos_min = 1.0f32;
         let mut thread_diff_max = 0.0f32;
-        for t in &texts {
+        for t in &text_refs {
             let a = eng.embed_single(ctx1, t);
             let b = eng.embed_single(ctxn, t);
             thread_cos_min = thread_cos_min.min(cosine(&a, &b));
@@ -346,7 +372,7 @@ fn mode_selfcheck() {
 
         // --- semantic sanity: paraphrase cosine > unrelated cosine ------------------
         // groups whose id starts "para" are positive pairs; "unrel" are negative pairs.
-        let ctx = eng.context(llama::LLAMA_POOLING_TYPE_MEAN, llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL, 0);
+        let ctx = eng.context(llama::LLAMA_POOLING_TYPE_LAST, llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL, 0);
         let para_cos = group_pair_cosine(&eng, ctx, &inputs, "para");
         let unrel_cos = group_pair_cosine(&eng, ctx, &inputs, "unrel");
         llama::llama_free(ctx);
