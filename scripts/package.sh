@@ -19,26 +19,29 @@ log() { printf '\033[1;34m[package]\033[0m %s\n' "$*"; }
 
 [[ -f "${DIST}/build-info.json" ]] || { echo "run build.sh first" >&2; exit 1; }
 
-# --- Merge smoke + benchmark results ----------------------------------------------
-smoke_json="null"; bench_json="null"
+# --- Merge smoke + benchmark + correctness results --------------------------------
+smoke_json="null"; bench_json="null"; correctness_json="null"
 [[ -f "${RESULTS}/smoke.json" ]] && smoke_json="$(cat "${RESULTS}/smoke.json")"
 [[ -f "${RESULTS}/bench.json" ]] && bench_json="$(cat "${RESULTS}/bench.json")"
+[[ -f "${RESULTS}/correctness.json" ]] && correctness_json="$(cat "${RESULTS}/correctness.json")"
 
-# The contract says a release carries PASSING smoke + benchmark provenance. Enforce it
-# here so we can't ship a release with missing/failed results. Set ALLOW_MISSING_RESULTS=1
-# only for local dev packaging.
+# The contract says a release carries PASSING smoke + benchmark + correctness provenance.
+# Enforce it here so we can't ship a release with missing/failed results. Set
+# ALLOW_MISSING_RESULTS=1 only for local dev packaging.
 if [[ "${ALLOW_MISSING_RESULTS:-0}" != "1" ]]; then
   [[ "$(jq -r '.passed // false' <<<"${smoke_json}")" == "true" ]] \
     || { echo "package: smoke result missing or not passed (set ALLOW_MISSING_RESULTS=1 for dev)" >&2; exit 1; }
   [[ "$(jq -r '.passed // false' <<<"${bench_json}")" == "true" ]] \
     || { echo "package: benchmark result missing or not passed (set ALLOW_MISSING_RESULTS=1 for dev)" >&2; exit 1; }
+  [[ "$(jq -r '.passed // false' <<<"${correctness_json}")" == "true" ]] \
+    || { echo "package: correctness result missing or not passed (set ALLOW_MISSING_RESULTS=1 for dev)" >&2; exit 1; }
 fi
 
 tmp="$(mktemp)"
-jq --argjson smoke "${smoke_json}" --argjson bench "${bench_json}" \
-   '.smoke = $smoke | .benchmark = $bench' \
+jq --argjson smoke "${smoke_json}" --argjson bench "${bench_json}" --argjson correctness "${correctness_json}" \
+   '.smoke = $smoke | .benchmark = $bench | .correctness = $correctness' \
    "${DIST}/build-info.json" > "${tmp}" && mv "${tmp}" "${DIST}/build-info.json"
-log "Merged smoke/benchmark results into build-info.json"
+log "Merged smoke/benchmark/correctness results into build-info.json"
 
 # --- License files ----------------------------------------------------------------
 mkdir -p "${DIST}/LICENSES"

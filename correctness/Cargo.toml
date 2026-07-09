@@ -1,0 +1,19 @@
+[package]
+name = "correctness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Numerical embedding-correctness harness. Links whatever archives STATIC_LLAMA_DIR
+# points at (via ../scripts/consume.build.rs) and runs one of three modes selected by
+# $CORRECTNESS_MODE: `emit` (write embedding vectors), `selfcheck` (determinism / batch /
+# thread invariance + semantic sanity), `compare` (cosine two emit files vs a threshold).
+# Driven by scripts/correctness.sh. Zero dependencies (matches smoke/ and bench/).
+[[bin]]
+name = "correctness"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+
+[workspace]

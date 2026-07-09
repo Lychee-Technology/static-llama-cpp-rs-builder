@@ -1,4 +1,4 @@
-# Artifact Contract — v2
+# Artifact Contract — v3
 
 This defines exactly what a release contains, how to link it, and how to verify it.
 Both llama.cpp and `llama-cpp-rs` lack strong semver/ABI stability, so **consumers pin a
@@ -6,11 +6,13 @@ contract version** and re-verify on every bump.
 
 ## Contract version
 
-`artifact_contract_version` (in `build-info.json`) is currently **`2`** (v1 → v2: Clang 18
-compiler and OpenMP dropped, so `-lgomp` left the link line). It **must** bump on any
-change to: the set of shipped `.a`, the link line, enabled cargo features, the binding ABI
-(crate tag / llama.cpp submodule), or the `dist/` layout. LTEmbed pins the contract version
-it supports and fails closed on an unexpected value.
+`artifact_contract_version` (in `build-info.json`) is currently **`3`** (v1 → v2: Clang 18
+compiler and OpenMP dropped, so `-lgomp` left the link line; v2 → v3: added the
+numerical-correctness gate and the `correctness` block in `build-info.json`). It **must**
+bump on any change to: the set of shipped `.a`, the link line, enabled cargo features, the
+binding ABI (crate tag / llama.cpp submodule), the `dist/` layout, or the guarantees a
+release carries. LTEmbed pins the contract version it supports and fails closed on an
+unexpected value.
 
 ## Release layout (`dist/`)
 
@@ -18,7 +20,7 @@ it supports and fails closed on an unexpected value.
 lib/            libllama.a libggml.a libggml-cpu.a libggml-base.a
 include/        llama.h ggml*.h ... (matching the pinned submodule)
 bindings.rs     generated FFI bindings (bindgen, Consts enums, prepend_enum_name=false)
-build-info.json full bill-of-materials + provenance + smoke/benchmark results
+build-info.json full bill-of-materials + provenance + smoke/benchmark/correctness results
 consume.build.rs drop-in build.rs (this repo's scripts/consume.build.rs)
 CONTRACT.md     this file
 SHA256SUMS      sha256 over every other file in the release
@@ -82,10 +84,41 @@ LICENSES/       llama.cpp, ggml, and builder licenses (all MIT)
    The high-level `llama-cpp-2` safe API is **not** part of this contract; wrap the FFI
    yourself if you need a safe layer.
 
+## Correctness gate (v3)
+
+A release fails unless the packaged archives compute the *right* embeddings — not merely
+finite/fast ones. `scripts/correctness.sh` runs on the release runner and records a
+`correctness` block in `build-info.json`. It checks, against a pinned reference model and
+additionally the deployed smoke/PGO model:
+
+- **Tuned-vs-generic parity (§2):** a second archive set built from source with generic
+  `-march=armv8-a` (scalar/generic kernels) on the *same host*; the tuned archives must
+  match it at **cosine ≥ 0.999**. Any divergence is purely the tuning/codegen flags — the
+  `v0.1.151-1` failure class.
+- **Golden parity (§1):** cosine **≥ 0.99** vs committed golden vectors produced offline by
+  the upstream `llama-embedding` binary at the pinned commit with generic flags
+  (`correctness/fixtures/golden.tsv`, regenerated via `scripts/gen-golden.sh`). Until that
+  file has data rows the golden check is recorded as `not_generated` and is non-fatal, while
+  §2 and §4 still gate.
+- **Modes & inputs (§3):** both **MEAN** and **LAST** pooling with **NON_CAUSAL** attention,
+  single-sequence and batched, over diverse inputs including non-ASCII/CJK.
+- **Self-consistency (§4):** determinism (identical bytes), batch-invariance, and
+  thread-invariance within eps, plus a coarse semantic-sanity check (paraphrase cosine >
+  unrelated cosine) that catches a fully collapsed/scrambled space with no external reference.
+
+**Hardware coverage (§5):** the gate runs on the GitHub-hosted **Neoverse-N2** runner. The
+deploy target is Graviton2 / **Neoverse-N1**, and a codegen/microarch fault can differ
+between N1 and N2. Running the gate on a real Graviton2/N1 host is **not yet covered** — this
+is a known gap (`build-info.json.correctness.hardware_coverage`). A disabled-by-default
+self-hosted N1 job exists in `release.yml` (`ENABLE_N1_CORRECTNESS=1`) to close it once a
+runner is provisioned.
+
 ## Guarantees & non-guarantees
 
 - **Guaranteed:** the archives were produced from the pinned inputs, passed the on-target
-  smoke test (real embedding), and were within the benchmark regression threshold vs a
-  from-source build (see `build-info.json.benchmark`).
-- **Not guaranteed:** ABI stability across contract versions, or that a different glibc/
+  smoke test (real embedding), were within the benchmark regression threshold vs a
+  from-source build (see `build-info.json.benchmark`), and passed the correctness gate above
+  (`build-info.json.correctness.passed == true`).
+- **Not guaranteed:** ABI stability across contract versions, correctness on a
+  microarchitecture other than the one the gate ran on (see §5), or that a different glibc/
   compiler baseline links cleanly. Rebuild + re-pin when you move the runtime base.

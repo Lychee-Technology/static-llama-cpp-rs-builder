@@ -292,7 +292,7 @@ jq -n \
                lscpu: $lscpu },
      libs: $libs, link_line: $link_line, bindings_sha256: $bindings_sha,
      builder_git_sha: $builder_sha, built_at: $built_at,
-     smoke: null, benchmark: null
+     smoke: null, benchmark: null, correctness: null
    }' > "${DIST}/build-info.json"
 
 log "Wrote ${DIST}/build-info.json"
