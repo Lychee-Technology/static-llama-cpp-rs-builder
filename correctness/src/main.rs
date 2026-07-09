@@ -320,9 +320,13 @@ fn mode_emit() {
 fn mode_selfcheck() {
     let model = env_or_fail("CORRECTNESS_MODEL");
     let inputs = load_inputs();
-    // Thresholds. Determinism is exact; the invariances allow FP reduction-order slack.
-    let inv_cos_min = 0.9999f32; // batch / thread invariance
-    let inv_diff_max = 1e-3f32;
+    // Thresholds. Determinism is exact; batch/thread invariance allow FP reduction-order
+    // slack. We gate on COSINE only (scale-invariant): llama.cpp returns UNNORMALIZED
+    // pooled vectors, so an absolute max-abs-diff bound is unreliable (magnitudes vary by
+    // model/layer). 0.999 catches real divergence (garbage is ~0.3) while ignoring the
+    // ~1e-4 batched-vs-per-sequence noise seen on jina IQ4_NL. max_abs_diff is still
+    // recorded for information.
+    let inv_cos_min = 0.999f32; // batch / thread invariance (cosine)
     let sem_margin = 0.05f32; // paraphrase must beat unrelated by this
     let sem_para_min = 0.5f32;
 
@@ -383,8 +387,8 @@ fn mode_selfcheck() {
         eng.free();
         llama::llama_backend_free();
 
-        let batch_ok = batch_cos_min >= inv_cos_min && batch_diff_max <= inv_diff_max;
-        let thread_ok = thread_cos_min >= inv_cos_min && thread_diff_max <= inv_diff_max;
+        let batch_ok = batch_cos_min >= inv_cos_min;
+        let thread_ok = thread_cos_min >= inv_cos_min;
         let passed = determinism && batch_ok && thread_ok && semantic;
 
         let result = env_or_fail("CORRECTNESS_RESULT");

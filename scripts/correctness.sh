@@ -123,8 +123,11 @@ compare "${E_TUNED_REF}" "${E_GEN_REF}" "${TUNED_GENERIC_MIN_COS}" "${RESULTS}/c
 [[ "${HAVE_SMOKE}" == 1 ]] && compare "${E_TUNED_SMK}" "${E_GEN_SMK}" "${TUNED_GENERIC_MIN_COS}" "${RESULTS}/correctness.generic.smoke.json"
 
 # §1 golden: only if golden.tsv has data rows (non-comment, non-blank).
+# grep -c prints "0" AND exits 1 when there are no matches, so capture with `|| true`
+# (NOT `|| echo 0`, which would append a second line and break the arithmetic test).
 GOLDEN_STATUS="not_generated"
-if [[ "$(grep -cvE '^[[:space:]]*(#.*)?$' "${GOLDEN}" 2>/dev/null || echo 0)" -gt 0 ]]; then
+GOLDEN_ROWS="$(grep -cvE '^[[:space:]]*(#.*)?$' "${GOLDEN}" 2>/dev/null || true)"
+if [[ "${GOLDEN_ROWS:-0}" -gt 0 ]]; then
   GOLDEN_STATUS="checked"
   compare "${E_TUNED_REF}" "${GOLDEN}" "${GOLDEN_MIN_COS}" "${RESULTS}/correctness.golden.ref.json"
 else
