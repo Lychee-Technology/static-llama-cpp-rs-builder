@@ -41,14 +41,23 @@ ENV CC=clang-18 CXX=clang++-18
 # bindgen (clang-sys) locates libclang here on AL2023 (llvm18 tree, not /usr/lib64).
 ENV LIBCLANG_PATH=/usr/lib64/llvm18/lib
 
-# Prove the PGO instrument runtime works: compile, link, AND RUN a -fprofile-generate
-# binary, then require it emitted a .profraw. Running (not just linking) is essential — a
-# mismatched profile runtime links fine but segfaults on execution, which is exactly how
-# the clang-15-vs-clang-18 bug hid before. Only PGO uses this; harmless for the default
-# build. Fails the image build loudly if compiler-rt18's profile runtime is missing/broken.
+# compiler-rt18 installs the profile lib under the NATIVE triple dir
+# (<resource>/lib/aarch64-amazon-linux-gnu/libclang_rt.profile.a), but the crate's cmake
+# build compiles with `--target=aarch64-unknown-linux-gnu`, so clang-18 looks under the
+# aarch64-unknown-linux-gnu per-target dir (and the legacy lib/linux path) and can't find
+# it. Bridge that with symlinks to the SAME compiler-rt18 lib (correct clang-18 ABI, so no
+# segfault). Then prove it by compiling, linking, AND RUNNING a -fprofile-generate binary
+# WITH that same --target (running, not just linking, is what catches a bad runtime — how
+# the clang-15 mismatch hid before). Only PGO uses this; harmless for the default build.
 RUN set -eux; \
+    resdir="$(clang-18 -print-resource-dir)"; \
+    src="$(find "${resdir}/lib" -name 'libclang_rt.profile*.a' -print -quit 2>/dev/null || true)"; \
+    test -n "${src}"; \
+    mkdir -p "${resdir}/lib/aarch64-unknown-linux-gnu" "${resdir}/lib/linux"; \
+    ln -sfn "${src}" "${resdir}/lib/aarch64-unknown-linux-gnu/libclang_rt.profile.a"; \
+    ln -sfn "${src}" "${resdir}/lib/linux/libclang_rt.profile-aarch64.a"; \
     printf 'int main(void){return 0;}\n' > /tmp/pgo-probe.c; \
-    clang-18 -fprofile-generate /tmp/pgo-probe.c -o /tmp/pgo-probe; \
+    clang-18 --target=aarch64-unknown-linux-gnu -fprofile-generate /tmp/pgo-probe.c -o /tmp/pgo-probe; \
     ( cd /tmp && LLVM_PROFILE_FILE=/tmp/pgo-%p.profraw ./pgo-probe ); \
     test -n "$(ls /tmp/pgo-*.profraw 2>/dev/null)"; \
     rm -f /tmp/pgo-probe /tmp/pgo-probe.c /tmp/pgo-*.profraw
