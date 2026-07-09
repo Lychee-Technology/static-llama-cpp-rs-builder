@@ -13,7 +13,7 @@ FROM amazonlinux:${AL2023_DIGEST}
 
 # --- Pinned tool versions (build inputs; bump deliberately) ---
 ARG CMAKE_VERSION=3.29.6
-ARG RUST_VERSION=1.85.0
+ARG RUST_VERSION=1.96.1
 
 # Compiler: Clang 18 (clang18) — builds the archives AND (via libclang from clang18-devel)
 # drives bindgen. gcc/g++ are still installed because clang uses GNU libstdc++ headers/crt

@@ -18,7 +18,7 @@ Single source of truth: [`scripts/config.env`](scripts/config.env).
 |---|---|
 | `llama-cpp-sys-2` | tag `0.1.151` |
 | llama.cpp submodule | `9e3b928…` (verified at build time) |
-| Rust | `1.85.0` (`rust-toolchain.toml`) |
+| Rust | `1.96.1` (`rust-toolchain.toml`) |
 | CMake | `3.29.6` (`Dockerfile`) |
 | Compiler | Clang 18 (AL2023 `clang18`), GNU libstdc++ |
 | CPU profile | `-O3 -march=armv8.2-a+fp16+dotprod+rcpc -mtune=neoverse-n1` (no `native`/`-mcpu`/`-flto`) |
