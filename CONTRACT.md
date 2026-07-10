@@ -1,4 +1,4 @@
-# Artifact Contract — v2
+# Artifact Contract — v3
 
 This defines exactly what a release contains, how to link it, and how to verify it.
 Both llama.cpp and `llama-cpp-rs` lack strong semver/ABI stability, so **consumers pin a
@@ -6,11 +6,13 @@ contract version** and re-verify on every bump.
 
 ## Contract version
 
-`artifact_contract_version` (in `build-info.json`) is currently **`2`** (v1 → v2: Clang 18
-compiler and OpenMP dropped, so `-lgomp` left the link line). It **must** bump on any
-change to: the set of shipped `.a`, the link line, enabled cargo features, the binding ABI
-(crate tag / llama.cpp submodule), or the `dist/` layout. LTEmbed pins the contract version
-it supports and fails closed on an unexpected value.
+`artifact_contract_version` (in `build-info.json`) is currently **`3`** (v1 → v2: Clang 18
+compiler and OpenMP dropped, so `-lgomp` left the link line; v2 → v3: added the
+numerical-correctness gate and the `correctness` block in `build-info.json`). It **must**
+bump on any change to: the set of shipped `.a`, the link line, enabled cargo features, the
+binding ABI (crate tag / llama.cpp submodule), the `dist/` layout, or the guarantees a
+release carries. LTEmbed pins the contract version it supports and fails closed on an
+unexpected value.
 
 ## Release layout (`dist/`)
 
@@ -18,7 +20,7 @@ it supports and fails closed on an unexpected value.
 lib/            libllama.a libggml.a libggml-cpu.a libggml-base.a
 include/        llama.h ggml*.h ... (matching the pinned submodule)
 bindings.rs     generated FFI bindings (bindgen, Consts enums, prepend_enum_name=false)
-build-info.json full bill-of-materials + provenance + smoke/benchmark results
+build-info.json full bill-of-materials + provenance + smoke/benchmark/correctness results
 consume.build.rs drop-in build.rs (this repo's scripts/consume.build.rs)
 CONTRACT.md     this file
 SHA256SUMS      sha256 over every other file in the release
@@ -35,6 +37,15 @@ LICENSES/       llama.cpp, ggml, and builder licenses (all MIT)
   uses its built-in threadpool, no libgomp/libomp dep; no `common` — it would add a
   `llama_rs_*` wrapper archive + bindings decls not needed for direct FFI).
 - Compiler: **Clang 18** (AL2023 `clang18`), GNU libstdc++.
+- **PGO (optional, `PGO=1`):** an opt-in profile-guided-optimization build. `build.sh` does a
+  3-phase build — instrument (`-fprofile-generate`) → train on the real embedding hot path
+  (`scripts/pgo-train.cpp`, `llama_encode`) against `PGO_TRAIN_MODEL` → optimize
+  (`-fprofile-use`). It changes **codegen only** — not the shipped `.a` set, link line,
+  features, binding ABI, or `dist/` layout — so it does **not** bump the contract version.
+  The profile is quant-type-specific (train on the deployed quant, e.g. IQ4_NL); its
+  `sha256`, training model, and iteration count are recorded in `build-info.json`'s `pgo`
+  block, and `bench.json` carries the measured `pgo_gain`. Default builds are non-PGO
+  (`pgo.enabled = false`).
 - Build image: `amazonlinux:2023` (aarch64), **resolved at build time and recorded** — not a
   reproducibility pin. LTEmbed deploys on AWS-managed AL2023 (Lambda/Fargate) whose patch
   level AWS controls, so **consumers pin the release artifact checksum, not the build image**.
@@ -73,10 +84,59 @@ LICENSES/       llama.cpp, ggml, and builder licenses (all MIT)
    The high-level `llama-cpp-2` safe API is **not** part of this contract; wrap the FFI
    yourself if you need a safe layer.
 
+## Correctness gate (v3)
+
+A release fails unless the packaged archives compute the *right* embeddings — not merely
+finite/fast ones. `scripts/correctness.sh` runs on the release runner and records a
+`correctness` block in `build-info.json`. The target model is
+**jina-embeddings-v5-text-nano-retrieval** (EuroBERT-210m, **last-token pooling**, dim 768,
+task prefixes `Query: `/`Document: `). Checks run against a pinned reference GGUF and
+additionally the deployed smoke/PGO model:
+
+- **Tuned-vs-generic parity (§2):** a second archive set built from source with generic
+  `-march=armv8-a` (scalar/generic kernels) on the *same host*; the tuned archives must
+  match it at **cosine ≥ 0.999**. Any divergence is purely the tuning/codegen flags — the
+  `v0.1.151-1` failure class.
+- **FP32 golden parity (§1):** cosine **≥ 0.98** between the packaged archives' embeddings
+  and committed golden vectors produced offline by the **FP32 PyTorch** model via
+  sentence-transformers (`scripts/gen-golden.py` → `correctness/fixtures/golden.tsv`).
+  Independent of the GGUF/llama.cpp path — it mirrors the downstream GGUF-vs-FP32 benchmark
+  that caught `v0.1.151-1`. Until that file has data rows the golden check is recorded as
+  `not_generated` and is non-fatal, while §2 and §4 still gate.
+  - **Threshold justification (0.98, vs issue #4's 0.99):** the deployed/reference GGUF is
+    **IQ4_NL — a 4-bit quantization**, so `cosine(IQ4_NL, FP32)` is floored by quantization
+    error, not runtime error (measured worst input `0.9845`; issue #4's `0.99` assumed a
+    higher-fidelity quant). That the gap is *quantization* and not a codegen fault is proven
+    on the same run by §2 (tuned-vs-generic `0.99981` — the two builds agree) and by the
+    `v0.1.151-1` garbage being `~0.31` — so `0.98` rejects that failure class with ~0.67
+    margin while not false-failing on legitimate 4-bit quantization.
+  - **Coverage of the deployed model:** `scripts/correctness.sh` **requires the deployed
+    `SMOKE_MODEL` to be byte-identical (sha256) to the pinned golden reference GGUF**, so the
+    single golden comparison authoritatively covers the deployed model — a bug specific to
+    the deployed model cannot ship golden-unchecked. Deploying a different quant requires a
+    golden for it.
+- **Modes & inputs (§3):** both **MEAN** and **LAST** pooling with **NON_CAUSAL** attention
+  (LAST is jina's deployment pooling), single-sequence and batched, over diverse query/
+  document inputs including non-ASCII/CJK. The jina task prompt is applied per role: the
+  llama.cpp side prepends the literal `Query: `/`Document: `, and the FP32 golden uses
+  sentence-transformers `prompt_name` (which applies the same strings).
+- **Self-consistency (§4):** determinism (identical bytes), batch-invariance, and
+  thread-invariance within eps, plus a coarse semantic-sanity check (paraphrase cosine >
+  unrelated cosine) that catches a fully collapsed/scrambled space with no external reference.
+
+**Hardware coverage (§5):** the gate runs on the GitHub-hosted **Neoverse-N2** runner. The
+deploy target is Graviton2 / **Neoverse-N1**, and a codegen/microarch fault can differ
+between N1 and N2. Running the gate on a real Graviton2/N1 host is **not yet covered** — this
+is a known gap (`build-info.json.correctness.hardware_coverage`). A disabled-by-default
+self-hosted N1 job exists in `release.yml` (`ENABLE_N1_CORRECTNESS=1`) to close it once a
+runner is provisioned.
+
 ## Guarantees & non-guarantees
 
 - **Guaranteed:** the archives were produced from the pinned inputs, passed the on-target
-  smoke test (real embedding), and were within the benchmark regression threshold vs a
-  from-source build (see `build-info.json.benchmark`).
-- **Not guaranteed:** ABI stability across contract versions, or that a different glibc/
+  smoke test (real embedding), were within the benchmark regression threshold vs a
+  from-source build (see `build-info.json.benchmark`), and passed the correctness gate above
+  (`build-info.json.correctness.passed == true`).
+- **Not guaranteed:** ABI stability across contract versions, correctness on a
+  microarchitecture other than the one the gate ran on (see §5), or that a different glibc/
   compiler baseline links cleanly. Rebuild + re-pin when you move the runtime base.

@@ -13,15 +13,23 @@ FROM amazonlinux:${AL2023_DIGEST}
 
 # --- Pinned tool versions (build inputs; bump deliberately) ---
 ARG CMAKE_VERSION=3.29.6
-ARG RUST_VERSION=1.85.0
+ARG RUST_VERSION=1.96.1
 
 # Compiler: Clang 18 (clang18) — builds the archives AND (via libclang from clang18-devel)
 # drives bindgen. gcc/g++ are still installed because clang uses GNU libstdc++ headers/crt
 # on Linux and rustc links via the `cc` (gcc) driver. python for ggml scripts.
+#
+# llvm18 provides `llvm-profdata` and compiler-rt18 provides libclang_rt.profile — both are
+# needed ONLY for the opt-in PGO build path (scripts/build.sh with PGO=1); the default
+# single-phase build does not use them. compiler-rt MUST be the clang-18-matched package
+# (compiler-rt18): AL2023's unversioned `compiler-rt` is clang-15's runtime, and linking
+# clang-18 -fprofile-generate against the clang-15 profile runtime SEGFAULTS at run time
+# (ABI mismatch). compiler-rt18 installs the profile lib in clang-18's per-target search
+# path so no path hack is needed. If AL2023 renames the package the image build fails here.
 RUN dnf -y update \
  && dnf -y install \
       gcc gcc-c++ \
-      clang18 clang18-devel \
+      clang18 clang18-devel llvm18 compiler-rt18 \
       git make ninja-build \
       python3 python3-pip \
       tar gzip xz which findutils jq \
@@ -32,6 +40,27 @@ RUN dnf -y update \
 ENV CC=clang-18 CXX=clang++-18
 # bindgen (clang-sys) locates libclang here on AL2023 (llvm18 tree, not /usr/lib64).
 ENV LIBCLANG_PATH=/usr/lib64/llvm18/lib
+
+# compiler-rt18 installs the profile lib under the NATIVE triple dir
+# (<resource>/lib/aarch64-amazon-linux-gnu/libclang_rt.profile.a), but the crate's cmake
+# build compiles with `--target=aarch64-unknown-linux-gnu`, so clang-18 looks under the
+# aarch64-unknown-linux-gnu per-target dir (and the legacy lib/linux path) and can't find
+# it. Bridge that with symlinks to the SAME compiler-rt18 lib (correct clang-18 ABI, so no
+# segfault). Then prove it by compiling, linking, AND RUNNING a -fprofile-generate binary
+# WITH that same --target (running, not just linking, is what catches a bad runtime — how
+# the clang-15 mismatch hid before). Only PGO uses this; harmless for the default build.
+RUN set -eux; \
+    resdir="$(clang-18 -print-resource-dir)"; \
+    src="$(find "${resdir}/lib" -name 'libclang_rt.profile*.a' -print -quit 2>/dev/null || true)"; \
+    test -n "${src}"; \
+    mkdir -p "${resdir}/lib/aarch64-unknown-linux-gnu" "${resdir}/lib/linux"; \
+    ln -sfn "${src}" "${resdir}/lib/aarch64-unknown-linux-gnu/libclang_rt.profile.a"; \
+    ln -sfn "${src}" "${resdir}/lib/linux/libclang_rt.profile-aarch64.a"; \
+    printf 'int main(void){return 0;}\n' > /tmp/pgo-probe.c; \
+    clang-18 --target=aarch64-unknown-linux-gnu -fprofile-generate /tmp/pgo-probe.c -o /tmp/pgo-probe; \
+    ( cd /tmp && LLVM_PROFILE_FILE=/tmp/pgo-%p.profraw ./pgo-probe ); \
+    test -n "$(ls /tmp/pgo-*.profraw 2>/dev/null)"; \
+    rm -f /tmp/pgo-probe /tmp/pgo-probe.c /tmp/pgo-*.profraw
 
 # CMake pinned to an exact version (do not rely on the distro package).
 RUN set -eux; \

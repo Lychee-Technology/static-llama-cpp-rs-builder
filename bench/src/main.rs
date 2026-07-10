@@ -30,8 +30,16 @@ fn main() {
         let ctx = llama::llama_init_from_model(model, cparams);
         assert!(!ctx.is_null(), "context init failed");
 
-        let text = "The quick brown fox jumps over the lazy dog near the Graviton2 server.";
-        let mut toks = vec![0i32; 128];
+        // Same representative mixed CN/EN sample as scripts/pgo-train.cpp, so the measured
+        // pgo_gain reflects the sequence shape the profile was trained on. text.len() is the
+        // UTF-8 BYTE count, which is what llama_tokenize expects.
+        let text = concat!(
+            "他问道:你想日后到英国去住吗？我说:不会的,我已经断了这个念头了 ",
+            "Do you think you'll want to go back and live in England?  he asked!",
+            "###I don't think so,  I said!",
+            "###I think I've got that much out of my system.",
+        );
+        let mut toks = vec![0i32; 512];
         let n = llama::llama_tokenize(
             vocab, text.as_ptr() as *const _, text.len() as i32,
             toks.as_mut_ptr(), toks.len() as i32, true, false,
