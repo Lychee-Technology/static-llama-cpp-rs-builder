@@ -24,9 +24,10 @@
 //!              in $CORRECTNESS_REF_POOLINGS (comma-separated, e.g. `last` for the golden,
 //!              `mean,last` for a generic emit) — fail-closed in both directions, naming
 //!              the labels, so an inputs.tsv row added, removed or renamed without
-//!              regenerating the golden can never pass by being silently skipped. Then
-//!              require cosine >= $CORRECTNESS_THRESHOLD for every B label, and FAIL if any
-//!              B label is missing from A. Writes $CORRECTNESS_RESULT.
+//!              regenerating the golden can never pass by being silently skipped, and a
+//!              B with no data rows at all (truncated, emptied or comment-only) fails the
+//!              same way. Then require cosine >= $CORRECTNESS_THRESHOLD for every B label,
+//!              and FAIL if any B label is missing from A. Writes $CORRECTNESS_RESULT.
 //!
 //! Inputs fixture path: $CORRECTNESS_INPUTS (TSV: `id<TAB>role<TAB>group<TAB>text`, `#` comments).
 //! Also prints llama_print_system_info() so compiled-in CPU features sit next to numbers.
@@ -177,7 +178,10 @@ fn parse_ref_poolings(spec: &str) -> Result<Vec<&str>, String> {
 //     renamed) without regenerating the reference, so it would otherwise be skipped;
 //   - a reference label no input produces: a row was removed or renamed, so the reference
 //     is stale;
-//   - a duplicate reference label: ambiguous, so it is never accepted.
+//   - a duplicate reference label: ambiguous, so it is never accepted;
+//   - no reference label at all (a truncated, emptied or comment-only file): every expected
+//     label is absent, and the message says so explicitly. This is the whole golden check
+//     for that case — scripts/correctness.sh has no "empty golden" skip (issue #9).
 fn check_reference_coverage(
     inputs: &[Input],
     poolings: &[&str],
@@ -200,6 +204,9 @@ fn check_reference_coverage(
         return Ok(());
     }
     let mut why: Vec<String> = Vec::new();
+    if ref_labels.is_empty() {
+        why.push("the reference has no data rows".to_string());
+    }
     if !missing.is_empty() {
         why.push(format!(
             "{} expected label(s) absent from the reference: {}",
@@ -789,6 +796,7 @@ para1_b\tdocument\tpara1\tSame, reworded\n";
             "{err}"
         );
         assert!(!err.contains("no input produces"), "{err}");
+        assert!(!err.contains("no data rows"), "{err}");
     }
 
     // A removed or renamed row leaves a stale golden label: still fails, naming it.
@@ -839,7 +847,38 @@ para1_b\tdocument\tpara1\tSame, reworded\n";
             "{err}"
         );
         let err = check_reference_coverage(&inputs(), &["last"], &[]).unwrap_err();
+        assert!(err.contains("the reference has no data rows"), "{err}");
         assert!(err.contains("4 expected label(s) absent"), "{err}");
+    }
+
+    // Issue #9: a golden.tsv that was truncated, emptied or left comment-only (a bad merge,
+    // a stray `> golden.tsv`) must fail the golden check, not degrade it to a skip. The
+    // file path is what scripts/correctness.sh hands to `compare`, so exercise read_emit on
+    // a real comment-only file: it yields no labels, and the coverage gate rejects that
+    // explicitly.
+    #[test]
+    fn comment_only_reference_file_yields_no_labels_and_fails_coverage() {
+        let path = std::env::temp_dir().join(format!(
+            "correctness-issue9-empty-golden-{}.tsv",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "# GOLDEN reference embeddings (§1). label<TAB>f0,f1,...\n\
+             # DO NOT EDIT BY HAND.\n\
+             \n",
+        )
+        .unwrap();
+        let golden = read_emit(path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+        assert!(golden.is_empty());
+        let golden_labels: Vec<String> = golden.iter().map(|(l, _)| l.clone()).collect();
+        let err = check_reference_coverage(&inputs(), &["last"], &golden_labels).unwrap_err();
+        assert!(err.contains("the reference has no data rows"), "{err}");
+        assert!(
+            err.contains("4 expected label(s) absent from the reference: d1|last, para1_a|last, para1_b|last, q1|last"),
+            "{err}"
+        );
     }
 
     // The committed fixture pair must pass the gate unchanged: every inputs.tsv row has

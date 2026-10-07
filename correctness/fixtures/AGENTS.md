@@ -43,8 +43,10 @@ golden), a removed or renamed input fails closed (the golden carries a label no 
 produces), and a duplicated or `|`-containing id is rejected when the fixture is parsed. An
 edited input that keeps its id is the one case the label gate cannot see: it is caught only
 if its vector drifts below the threshold, which is why regeneration is required for every
-row change, not just additions and removals. The gate is only reached once `golden.tsv` has
-data rows; an empty golden is still the documented non-fatal `not_generated` skip.
+row change, not just additions and removals. The golden compare runs on every
+`scripts/correctness.sh` run; there is no skip. A `golden.tsv` that is missing or has no
+data rows (truncated, emptied or comment-only) fails the gate the same way, naming the file,
+so neither state can quietly drop FP32 golden parity from a release.
 
 The rows whose group starts with `para` and `unrel` are the paraphrase and unrelated pairs
 for the self-consistency semantic-sanity check. Each needs at least two rows.
