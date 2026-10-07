@@ -3,7 +3,12 @@
 //!
 //! Env: SMOKE_MODEL (GGUF path), BENCH_ITERS (default 200), BENCH_RESULT (output JSON).
 
-#![allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code)]
+#![allow(
+    non_upper_case_globals,
+    non_camel_case_types,
+    non_snake_case,
+    dead_code
+)]
 
 mod llama {
     include!(env!("STATIC_LLAMA_BINDINGS"));
@@ -14,7 +19,10 @@ use std::time::Instant;
 
 fn main() {
     let model_path = std::env::var("SMOKE_MODEL").expect("$SMOKE_MODEL not set");
-    let iters: u32 = std::env::var("BENCH_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(200);
+    let iters: u32 = std::env::var("BENCH_ITERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200);
     let c_model = CString::new(model_path).unwrap();
 
     unsafe {
@@ -41,8 +49,13 @@ fn main() {
         );
         let mut toks = vec![0i32; 512];
         let n = llama::llama_tokenize(
-            vocab, text.as_ptr() as *const _, text.len() as i32,
-            toks.as_mut_ptr(), toks.len() as i32, true, false,
+            vocab,
+            text.as_ptr() as *const _,
+            text.len() as i32,
+            toks.as_mut_ptr(),
+            toks.len() as i32,
+            true,
+            false,
         );
         assert!(n > 0, "tokenize failed");
         toks.truncate(n as usize);
@@ -61,7 +74,9 @@ fn main() {
         let secs = start.elapsed().as_secs_f64();
         let eps = iters as f64 / secs;
 
-        println!("[bench] {iters} encodes in {secs:.3}s => {eps:.2} embeddings/s ({n} tokens each)");
+        println!(
+            "[bench] {iters} encodes in {secs:.3}s => {eps:.2} embeddings/s ({n} tokens each)"
+        );
         if let Ok(path) = std::env::var("BENCH_RESULT") {
             std::fs::write(
                 path,
