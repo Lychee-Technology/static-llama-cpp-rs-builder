@@ -47,8 +47,10 @@ log "Merged smoke/benchmark/correctness results into build-info.json"
 mkdir -p "${DIST}/LICENSES"
 cp -v "${ROOT}/LICENSE" "${DIST}/LICENSES/static-llama-cpp-rs-builder.LICENSE"
 if [[ -d "${SRC}" ]]; then
-  cp -v "${SRC}/llama-cpp-sys-2/llama.cpp/LICENSE" "${DIST}/LICENSES/llama.cpp.LICENSE" 2>/dev/null || true
-  # ggml ships under the same MIT license; copy if present as a separate file.
+  # The compiled llama.cpp's own license is mandatory (shipping its code requires it).
+  cp -v "${SRC}/llama-cpp-sys-2/llama.cpp/LICENSE" "${DIST}/LICENSES/llama.cpp.LICENSE"
+  # ggml ships under the same MIT license; copy if present as a separate file (absent
+  # from the llama.cpp tree as of v0.6.0, where ggml is covered by the top-level LICENSE).
   cp -v "${SRC}/llama-cpp-sys-2/llama.cpp/ggml/LICENSE" "${DIST}/LICENSES/ggml.LICENSE" 2>/dev/null || true
 fi
 
