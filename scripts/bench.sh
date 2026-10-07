@@ -12,6 +12,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/config.env"
+LIB_TAG=bench
+source "${ROOT}/scripts/lib.sh"
+# Same native-host / build-input gates as build.sh (the from-source baseline is compiled too); before any side effect.
+assert_native_host
+assert_no_build_env_overrides
+read -r -a ISA_DEFS <<<"${GGML_ISA_DEFINES}"   # same profile ISA options as build.sh
 
 DIST="${DIST:-${ROOT}/dist}"
 RESULTS="${RESULTS:-${ROOT}/.build/results}"
@@ -20,7 +26,7 @@ ITERS="${BENCH_ITERS:-200}"
 THRESHOLD_PCT="${BENCH_REGRESS_THRESHOLD_PCT:-3}"   # prebuilt must be >= source * (1 - t%)
 
 : "${SMOKE_MODEL:?set SMOKE_MODEL to the pinned GGUF (see smoke/fixtures/fetch-model.sh)}"
-mkdir -p "${RESULTS}" "${SRC_DIST}/lib"
+mkdir -p "${RESULTS}"
 log() { printf '\033[1;34m[bench]\033[0m %s\n' "$*"; }
 
 # --- One INDEPENDENT from-source clone (fresh), reused for every variant -----------
@@ -31,32 +37,28 @@ CFLAGS_ENV="${CFLAGS:-}"; CXXFLAGS_ENV="${CXXFLAGS:-}"   # inherited extras, app
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
 
 SRC_BUILD="${ROOT}/.build/source-build"
-if [[ ! -d "${SRC_BUILD}/.git" ]]; then
-  log "fresh clone for from-source baseline: ${CRATE_REPO} @ ${CRATE_TAG}"
-  git clone --depth 1 --branch "${CRATE_TAG}" --recursive "${CRATE_REPO}" "${SRC_BUILD}"
+# Same pinned + verified sources as build.sh (crate commit, llama.cpp tag/commit).
+prepare_crate_source "${SRC_BUILD}"
+# Same profile flags as build.sh so the comparison is apples-to-apples (aarch64: the N1
+# GGML_CPU_ARM_ARCH patch; x86_64: -march=x86-64-v3 + GGML_ISA_DEFINES, nothing to patch).
+if [[ "${TARGET_ARCH}" == "aarch64" ]]; then
+  patch_ggml_arm_arch "${SRC_BUILD}/llama-cpp-sys-2/build.rs" \
+    || { echo "[bench] failed to patch GGML_CPU_ARM_ARCH" >&2; exit 1; }
 fi
-# Same N1 tuning as build.sh so the comparison is apples-to-apples.
-patch_ggml_arm_arch "${SRC_BUILD}/llama-cpp-sys-2/build.rs" \
-  || { echo "[bench] failed to patch GGML_CPU_ARM_ARCH" >&2; exit 1; }
 
 # Build llama-cpp-sys-2 from source and harvest its .a + bindings into a dist-like dir.
 # $1 = extra CFLAGS (e.g. -fprofile-use=...), $2 = CARGO_TARGET_DIR, $3 = dest dir.
+# The target dir is wiped first so every variant is a real recompile of the pinned source.
 build_and_harvest() {
   local extra="$1" target="$2" dest="$3" out
-  mkdir -p "${dest}/lib"
   log "from-source build -> $(basename "${dest}") (extra: '${extra}')"
-  ( cd "${SRC_BUILD}"
-    export CFLAGS="${CFLAGS_TUNE} ${extra} ${CFLAGS_ENV}"
+  rm -rf "${target}" "${dest}"
+  ( export CFLAGS="${CFLAGS_TUNE} ${extra} ${CFLAGS_ENV}"
     export CXXFLAGS="${CFLAGS_TUNE} ${extra} ${CXXFLAGS_ENV}"
     export CARGO_TARGET_DIR="${target}"
-    cargo build --release -p llama-cpp-sys-2 ${CRATE_FEATURES:+--features "${CRATE_FEATURES}"} )
-  # `-print -quit` (not `| head -n1`) to avoid SIGPIPE-failing find under `set -o pipefail`.
-  out="$(find "${target}" -type d -name out -path '*release/build*llama-cpp-sys-2*' -print -quit)"
-  [[ -n "${out}" ]] || { echo "[bench] from-source OUT_DIR not found in ${target}" >&2; exit 1; }
-  for lib in ${STATIC_LIBS}; do
-    cp "$(find "${out}" -name "${lib}" -print -quit)" "${dest}/lib/${lib}"
-  done
-  cp "$(find "${out}" -name bindings.rs -print -quit)" "${dest}/bindings.rs"
+    build_sys_crate "${SRC_BUILD}" ${ISA_DEFS[@]+"${ISA_DEFS[@]}"} )
+  out="$(find_sys_out_dir "${target}")"
+  harvest_sys_outputs "${out}" "${dest}"
 }
 
 run() {  # $1 = label, $2 = STATIC_LLAMA_DIR, $3 = result file
@@ -71,6 +73,13 @@ if [[ "${PGO}" == "1" ]]; then
   PGO_PROFDATA="${WORK:-${ROOT}/.build}/pgo/pgo.profdata"
   [[ -f "${PGO_PROFDATA}" ]] \
     || { echo "[bench] PGO=1 needs ${PGO_PROFDATA}; run scripts/build.sh with PGO=1 first" >&2; exit 1; }
+  # Never use a profile trained for another arch/baseline (ARM and x86 profiles never mix).
+  PGO_META="$(dirname "${PGO_PROFDATA}")/pgo.meta.json"
+  jq -e --arg arch "${TARGET_ARCH}" --arg baseline "${CPU_BASELINE}" \
+        --arg sha "$(sha256sum "${PGO_PROFDATA}" | awk '{print $1}')" \
+        '.architecture == $arch and .cpu_baseline == $baseline and .profdata_sha256 == $sha' \
+        "${PGO_META}" >/dev/null 2>&1 \
+    || { echo "[bench] ${PGO_PROFDATA} was not trained for ${TARGET_ARCH}/${CPU_BASELINE} (see ${PGO_META})" >&2; exit 1; }
   SRC_DIST_NOPGO="${ROOT}/.build/source-dist-nopgo"
   SRC_DIST_PGO="${ROOT}/.build/source-dist-pgo"
   build_and_harvest ""                                                        "${SRC_BUILD}/target-nopgo" "${SRC_DIST_NOPGO}"

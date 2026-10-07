@@ -1,4 +1,6 @@
-// Drop-in build.rs for linking the prebuilt Graviton2 static llama.cpp archives.
+// Drop-in build.rs for linking the prebuilt static llama.cpp archives (either production
+// variant: aarch64-graviton2 or x86_64-v3; use the one whose build-info.json `target_triple`
+// equals your crate's target, the archives contain native code for that target only).
 //
 // Copy this into your crate as `build.rs` (LTEmbed does this), or `include!` it.
 // Point STATIC_LLAMA_DIR at the directory of a VERIFIED, extracted release — the one

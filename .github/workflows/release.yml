@@ -1,14 +1,36 @@
 name: build-static-llama-cpp
 
-# Builds Graviton2 (Neoverse N1) tuned static llama.cpp archives on a GitHub-managed
-# ARM64 runner (Neoverse N2, backward-compatible with N1), inside a resolved-and-recorded
-# AL2023 container. Publishes verified artifacts as a GitHub Release on tag push.
+# Builds the two production variants of the static llama.cpp archives. Each variant is built
+# on a GitHub-managed runner OF ITS OWN ARCHITECTURE, inside a resolved-and-recorded AL2023
+# container of that same architecture, and publishes verified artifacts as ONE GitHub
+# Release on tag push:
+#
+#   variant             runner            target                     CPU baseline
+#   aarch64-graviton2   ubuntu-24.04-arm  aarch64-unknown-linux-gnu  armv8.2-a+fp16+dotprod+rcpc, -mtune=neoverse-n1
+#   x86_64-v3           ubuntu-24.04      x86_64-unknown-linux-gnu   x86-64-v3 (generic tuning)
+#
+# Native-only: runner arch == container arch == compiler arch == artifact arch. Every build
+# job asserts a native runner of the matrix arch (x86_64 also: the runner CPU passes the
+# fail-closed x86-64-v3 gate) BEFORE the image is built. The docker platform is derived from
+# the runner's own `uname -m` after that assertion, so `--platform` only ever selects the
+# native image — it is never used to emulate. There is NO cross compilation (x86 -> ARM or
+# ARM -> x86), no QEMU / binfmt_misc, no buildx emulation, no cross-rs / cargo-zigbuild /
+# zig, no CMake cross toolchain. A runner that fails the x86-64-v3 gate FAILS the job: CI
+# never falls back to x86-64-v2 and never changes CPU_MARCH (the baseline is part of the
+# artifact contract, fixed in scripts/config.env, not something CI negotiates).
+#
+# All pins (llama.cpp tag + commit, llama-cpp-rs ref + commit, contract version, target
+# profiles) come from scripts/config.env; build.sh verifies them by commit and
+# verify-provenance.sh re-checks the recorded build-info.json before anything is uploaded.
+# No build caches are used.
 #
 # Optional PGO (profile-guided optimization): enable via the `pgo` workflow_dispatch input,
-# or the RELEASE_PGO repo variable ("1") for tag-triggered releases. The profile is
-# quant-specific and trains on the smoke/bench model, so for a PGO release point
-# SMOKE_MODEL_URL/SHA256 at the quant you deploy (e.g. IQ4_NL). Codegen-only: pgo.enabled
-# is recorded in build-info.json; the artifact contract is unchanged. Default off.
+# or the RELEASE_PGO repo variable ("1") for tag-triggered releases. Each variant trains its
+# OWN profile on its own native runner (x86_64: built with -march=x86-64-v3 on a v3 host);
+# profiles are never shared between architectures. The profile is quant-specific and trains
+# on the smoke/bench model, so for a PGO release point SMOKE_MODEL_URL/SHA256 at the quant
+# you deploy (e.g. IQ4_NL). Codegen-only: pgo.* is recorded in build-info.json; the artifact
+# contract is unchanged. Default off.
 
 on:
   push:
@@ -22,13 +44,57 @@ on:
         default: false
 
 permissions:
-  contents: write   # create releases / upload assets
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-24.04-arm      # GitHub-hosted ARM64 (Neoverse N2)
+    name: build (${{ matrix.profile }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Exactly the two production variants (scripts/config.env SUPPORTED_TARGET_PROFILES).
+        # There is no x86-64-v2 / generic variant.
+        include:
+          - profile: aarch64-graviton2
+            arch: aarch64
+            runner: ubuntu-24.04-arm   # GitHub-hosted ARM64 (Neoverse N2, ISA superset of N1)
+            uarch: neoverse-n2
+          - profile: x86_64-v3
+            arch: x86_64
+            runner: ubuntu-24.04       # GitHub-hosted x86-64; must pass the x86-64-v3 gate
+            uarch: ""                  # recorded from the runner's own CPU (runner.cpu_model)
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
+
+      - name: Assert native ${{ matrix.arch }} runner (no cross-compilation / emulation)
+        run: bash scripts/assert-native-runner.sh "${{ matrix.arch }}"
+
+      - name: Resolve native docker platform + artifact variant
+        id: plat
+        env:
+          PROFILE: ${{ matrix.profile }}
+          WANT_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # Derived from the runner itself (already asserted native above), never from a
+          # free-form matrix value: the image is always the runner's own architecture.
+          m="$(uname -m)"
+          [[ "${m}" == "${WANT_ARCH}" ]] || { echo "::error::runner is ${m}, matrix wants ${WANT_ARCH}" >&2; exit 1; }
+          case "${m}" in
+            aarch64) docker_arch=arm64 ;;
+            x86_64)  docker_arch=amd64 ;;
+            *) echo "::error::unsupported runner architecture ${m}" >&2; exit 1 ;;
+          esac
+          source scripts/config.env
+          # The host-selected profile must be the matrix profile (no profile override).
+          [[ "${TARGET_PROFILE}" == "${PROFILE}" ]] \
+            || { echo "::error::config.env selects '${TARGET_PROFILE}' on ${m}, matrix wants '${PROFILE}'" >&2; exit 1; }
+          echo "docker_arch=${docker_arch}" >> "$GITHUB_OUTPUT"
+          echo "variant=${ARTIFACT_VARIANT}" >> "$GITHUB_OUTPUT"
+          echo "native ${m}: docker platform linux/${docker_arch}, profile ${TARGET_PROFILE}, artifact variant ${ARTIFACT_VARIANT}, flags '${CFLAGS_TUNE}'"
 
       - name: Resolve PGO toggle
         id: pgo
@@ -46,32 +112,41 @@ jobs:
           echo "enabled=${enabled}" >> "$GITHUB_OUTPUT"
           echo "PGO-optimized release build: ${enabled}"
 
-      - name: Resolve AL2023 aarch64 digest
+      - name: Resolve AL2023 ${{ matrix.arch }} digest
         id: img
+        env:
+          DOCKER_ARCH: ${{ steps.plat.outputs.docker_arch }}
         run: |
           set -euo pipefail
           # AL2023 is resolved-and-recorded provenance, not a runtime pin. Use the optional
-          # AL2023_DIGEST override if set (pins base image for tracing); else resolve the current
-          # ARM64 manifest digest for the tag. Must select the arm64 entry — .[0]/index digest
-          # can point at amd64 and would exec-format-error on this arm64 runner.
+          # AL2023_DIGEST override if set (pins base image for tracing); else resolve the
+          # current manifest digest for THIS runner's architecture. Must select the native
+          # entry — .[0]/index digest can point at the other arch and would exec-format-error
+          # (or, worse, be emulated) on this runner.
           source scripts/config.env
           digest="${AL2023_DIGEST:-}"
           if [[ -z "${digest}" ]]; then
             digest="$(docker manifest inspect amazonlinux:2023 \
-              | jq -r '.manifests[] | select(.platform.architecture=="arm64" and .platform.os=="linux") | .digest' \
+              | jq -r --arg a "${DOCKER_ARCH}" '.manifests[] | select(.platform.architecture==$a and .platform.os=="linux") | .digest' \
               | head -n1)"
           fi
-          [[ -n "${digest}" && "${digest}" != "null" ]] || { echo "could not resolve arm64 digest" >&2; exit 1; }
+          [[ -n "${digest}" && "${digest}" != "null" ]] || { echo "could not resolve ${DOCKER_ARCH} digest" >&2; exit 1; }
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "image=amazonlinux:2023@${digest}" >> "$GITHUB_OUTPUT"
 
-      - name: Build builder image
+      - name: Build builder image (native)
+        env:
+          DOCKER_ARCH: ${{ steps.plat.outputs.docker_arch }}
         run: |
-          docker build --platform linux/arm64 \
+          set -euo pipefail
+          docker build --platform "linux/${DOCKER_ARCH}" \
             --build-arg AL2023_DIGEST="2023@${{ steps.img.outputs.digest }}" \
             -t static-llama-builder:ci .
+          img_arch="$(docker image inspect --format '{{.Architecture}}' static-llama-builder:ci)"
+          [[ "${img_arch}" == "${DOCKER_ARCH}" ]] \
+            || { echo "::error::builder image is ${img_arch}, runner is ${DOCKER_ARCH}" >&2; exit 1; }
 
-      - name: Build + smoke + bench + package (in container)
+      - name: Build + smoke + correctness + bench + package (in container)
         env:
           SMOKE_MODEL_URL: ${{ vars.SMOKE_MODEL_URL }}
           SMOKE_MODEL_SHA256: ${{ vars.SMOKE_MODEL_SHA256 }}
@@ -82,12 +157,16 @@ jobs:
           COMPILER_IMAGE: ${{ steps.img.outputs.image }}
           PGO: ${{ steps.pgo.outputs.enabled }}          # 1 => 3-phase profile-guided build
           PGO_TRAIN_ITERS: ${{ vars.PGO_TRAIN_ITERS }}   # optional override; empty => config default
+          RUNNER_KIND: github-hosted
+          RUNNER_LABEL: ${{ matrix.runner }}
+          RUNNER_UARCH: ${{ matrix.uarch }}
         run: |
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/work" -w /work \
             -e SMOKE_MODEL_URL -e SMOKE_MODEL_SHA256 \
             -e CORRECTNESS_MODEL_URL -e CORRECTNESS_MODEL_SHA256 \
             -e COMPILER_IMAGE -e PGO -e PGO_TRAIN_ITERS \
+            -e RUNNER_KIND -e RUNNER_LABEL -e RUNNER_UARCH \
             static-llama-builder:ci bash -euo pipefail -c '
               git config --global --add safe.directory "*"
               # Fetch the model FIRST: when PGO=1, build.sh trains the profile on it
@@ -97,6 +176,7 @@ jobs:
               export SMOKE_MODEL="$(bash smoke/fixtures/fetch-model.sh)"
               export RESULTS=/work/.build/results; mkdir -p "$RESULTS"
               bash scripts/build.sh
+              bash scripts/verify-provenance.sh dist/build-info.json
               SMOKE_RESULT="$RESULTS/smoke.json" \
                 cargo run --release --manifest-path smoke/Cargo.toml
               # Numerical-correctness gate: tuned-vs-generic + golden parity + self-
@@ -109,31 +189,115 @@ jobs:
       - name: Verify checksums
         run: cd dist && sha256sum -c SHA256SUMS
 
+      # Fail-closed: the build-info.json about to be uploaded/published must record exactly
+      # the pinned llama.cpp tag + commit, llama-cpp-rs ref + commit, llama-cpp-sys-2
+      # version, contract version and THIS matrix profile (arch, triple, CPU baseline,
+      # flags) from scripts/config.env, and a native build.
+      - name: Verify provenance (build-info.json vs scripts/config.env)
+        run: bash scripts/verify-provenance.sh dist/build-info.json "${{ matrix.profile }}"
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7
         with:
-          name: static-llama-cpp-aarch64-graviton2
+          name: static-llama-cpp-${{ steps.plat.outputs.variant }}
           path: dist/**
 
-      - name: Publish release assets
+      - name: Stage release assets
         if: startsWith(github.ref, 'refs/tags/')
+        env:
+          VARIANT: ${{ steps.plat.outputs.variant }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          tarball="static-llama-cpp-${GITHUB_REF_NAME}-${VARIANT}.tar.gz"
+          ( cd dist && tar czf "../release-assets/${tarball}" . )
+          # Checksum of the DOWNLOADED artifact (the tarball) — this is what consumers pin,
+          # separate from SHA256SUMS which covers the extracted contents.
+          ( cd release-assets && sha256sum "${tarball}" > "${tarball}.sha256" )
+          # Per-variant copies of the loose metadata (both variants share one release).
+          cp dist/build-info.json "release-assets/build-info-${VARIANT}.json"
+          cp dist/SHA256SUMS      "release-assets/SHA256SUMS-${VARIANT}"
+          ls -l release-assets
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets-${{ steps.plat.outputs.variant }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  # One GitHub Release carrying exactly the two production variants. Runs only after BOTH
+  # native build jobs succeeded; it compiles nothing (download, re-verify, publish).
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # create releases / upload assets
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download release assets
+        uses: actions/download-artifact@v7
+        with:
+          pattern: release-assets-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify both variants (checksums + provenance)
+        run: |
+          set -euo pipefail
+          source scripts/config.env
+          cd release-assets
+          ls -l
+          read -r -a profiles <<<"${SUPPORTED_TARGET_PROFILES}"
+          [[ "${#profiles[@]}" -eq 2 ]] || { echo "::error::expected exactly 2 production variants, config lists ${#profiles[@]}" >&2; exit 1; }
+          expected=()
+          for profile in "${profiles[@]}"; do
+            set_target_profile "${profile}"
+            tarball="static-llama-cpp-${GITHUB_REF_NAME}-${ARTIFACT_VARIANT}.tar.gz"
+            [[ -f "${tarball}" ]] || { echo "::error::missing ${tarball}" >&2; exit 1; }
+            sha256sum -c "${tarball}.sha256"
+            # The loose build-info must be the one inside the tarball, and must verify
+            # against THIS variant's profile.
+            tar xzf "${tarball}" -O ./build-info.json | cmp - "build-info-${ARTIFACT_VARIANT}.json"
+            bash ../scripts/verify-provenance.sh "build-info-${ARTIFACT_VARIANT}.json" "${profile}"
+            expected+=("${tarball}" "${tarball}.sha256" "build-info-${ARTIFACT_VARIANT}.json" "SHA256SUMS-${ARTIFACT_VARIANT}")
+          done
+          # Nothing else (no v2 / generic / stray asset) may be published.
+          diff <(printf '%s\n' "${expected[@]}" | sort) <(find . -maxdepth 1 -type f -printf '%f\n' | sort) \
+            || { echo "::error::release assets differ from the two production variants" >&2; exit 1; }
+
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tarball="static-llama-cpp-${GITHUB_REF_NAME}-aarch64-graviton2.tar.gz"
-          ( cd dist && tar czf "../${tarball}" . )
-          # Checksum of the DOWNLOADED artifact (the tarball) — this is what consumers pin,
-          # separate from dist/SHA256SUMS which covers the extracted contents.
-          sha256sum "${tarball}" > "${tarball}.sha256"
+          {
+            echo "static-llama-cpp ${GITHUB_REF_NAME}: prebuilt static llama.cpp archives, two native production variants."
+            echo
+            echo "| Architecture | Target | CPU baseline | Asset |"
+            echo "|---|---|---|---|"
+            for f in release-assets/build-info-*.json; do
+              v="${f#release-assets/build-info-}"; v="${v%.json}"
+              jq -r --arg t "static-llama-cpp-${GITHUB_REF_NAME}-${v}.tar.gz" \
+                '"| \(.architecture) | \(.target_triple) | \(.cpu_baseline) (`\(.effective_arch_flags)`) | `\($t)` |"' "${f}"
+            done
+            echo
+            echo "Each variant was built natively on its own architecture (no cross compilation, no CPU emulation)."
+            echo "Supported x86 baseline: x86-64-v3. CPUs older than x86-64-v3 are intentionally unsupported."
+            echo "Full provenance: build-info-<variant>.json. Contract: CONTRACT.md."
+          } > release-notes.md
+          cp CONTRACT.md release-assets/CONTRACT.md
           gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
             --title "static-llama-cpp ${GITHUB_REF_NAME}" \
-            --notes-file dist/build-info.json \
-            "${tarball}" "${tarball}.sha256" \
-            dist/SHA256SUMS dist/build-info.json dist/CONTRACT.md
+            --notes-file release-notes.md \
+            release-assets/*
 
   # §5 hardware coverage — DISABLED by default (documented gap in CONTRACT.md).
-  # The release gate above runs the correctness checks on the GitHub-hosted N2 runner.
+  # The release gate above runs the ARM64 correctness checks on the GitHub-hosted N2 runner.
   # A codegen/microarch fault can differ between N1 and N2, so the correctness gate
   # should ALSO run on a real Graviton2 / Neoverse-N1 host. There is no self-hosted N1
   # runner yet; enable this by setting the repo variable ENABLE_N1_CORRECTNESS=1 once a
@@ -144,6 +308,9 @@ jobs:
     runs-on: [self-hosted, linux, ARM64, graviton2]   # real Graviton2 (Neoverse N1)
     steps:
       - uses: actions/checkout@v7
+
+      - name: Assert native ARM64 runner (no cross-compilation / emulation)
+        run: bash scripts/assert-native-runner.sh aarch64
 
       - name: Resolve AL2023 aarch64 digest
         id: img
@@ -160,7 +327,7 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "image=amazonlinux:2023@${digest}" >> "$GITHUB_OUTPUT"
 
-      - name: Build builder image
+      - name: Build builder image (native)
         run: |
           docker build --platform linux/arm64 \
             --build-arg AL2023_DIGEST="2023@${{ steps.img.outputs.digest }}" \
@@ -173,16 +340,21 @@ jobs:
           CORRECTNESS_MODEL_URL: ${{ vars.CORRECTNESS_MODEL_URL }}
           CORRECTNESS_MODEL_SHA256: ${{ vars.CORRECTNESS_MODEL_SHA256 }}
           COMPILER_IMAGE: ${{ steps.img.outputs.image }}
+          RUNNER_KIND: self-hosted
+          RUNNER_LABEL: graviton2
+          RUNNER_UARCH: neoverse-n1
         run: |
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/work" -w /work \
             -e SMOKE_MODEL_URL -e SMOKE_MODEL_SHA256 \
             -e CORRECTNESS_MODEL_URL -e CORRECTNESS_MODEL_SHA256 -e COMPILER_IMAGE \
+            -e RUNNER_KIND -e RUNNER_LABEL -e RUNNER_UARCH \
             static-llama-builder:ci bash -euo pipefail -c '
               git config --global --add safe.directory "*"
               export SMOKE_MODEL="$(bash smoke/fixtures/fetch-model.sh)"
               export RESULTS=/work/.build/results; mkdir -p "$RESULTS"
               bash scripts/build.sh
+              bash scripts/verify-provenance.sh dist/build-info.json aarch64-graviton2
               bash scripts/correctness.sh
               jq . "$RESULTS/correctness.json"
             '

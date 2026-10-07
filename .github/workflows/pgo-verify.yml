@@ -1,14 +1,21 @@
 name: verify-pgo
 
-# Manually-triggered verification of the opt-in PGO build path (scripts/build.sh PGO=1).
-# Runs on the same GitHub-managed ARM64 (Neoverse N2) runner + resolved AL2023 container as
-# the release workflow. Parameterizes the PGO training model, then asserts: the image ships
-# the PGO toolchain, the 3-phase build produces a recorded profile, and bench reports a
-# non-regressing pgo_gain plus a passing (both-PGO) parity check.
+# Manually-triggered verification of the opt-in PGO build path (scripts/build.sh PGO=1),
+# for both production variants: aarch64-graviton2 on the GitHub-managed ARM64 (Neoverse N2)
+# runner and x86_64-v3 on the GitHub-managed x86-64 runner (which must pass the x86-64-v3
+# gate), each in a resolved AL2023 container of its own architecture, as in release.yml.
+# Parameterizes the PGO training model, then asserts: the image ships the PGO toolchain,
+# the 3-phase build produces a recorded profile trained for THAT architecture and CPU
+# baseline (x86_64: instrumented + trained with -march=x86-64-v3 on a native v3 host;
+# profiles are never shared between architectures), and bench reports a non-regressing
+# pgo_gain plus a passing (both-PGO) parity check.
 #
 # The profile is quant-type-specific, so pass an IQ4_NL (or whatever you deploy) embedding
 # GGUF. That one model serves as BOTH the PGO training model and the bench workload model,
 # so training / measurement / deploy shapes match.
+#
+# Native-only (runner arch == container arch == compiler arch == artifact arch; no cross
+# compilation, no CPU emulation); see release.yml.
 
 on:
   workflow_dispatch:
@@ -35,9 +42,43 @@ permissions:
 
 jobs:
   verify-pgo:
-    runs-on: ubuntu-24.04-arm      # GitHub-hosted ARM64 (Neoverse N2)
+    name: verify-pgo (${{ matrix.profile }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: aarch64-graviton2
+            arch: aarch64
+            runner: ubuntu-24.04-arm   # GitHub-hosted ARM64 (Neoverse N2)
+          - profile: x86_64-v3
+            arch: x86_64
+            runner: ubuntu-24.04       # GitHub-hosted x86-64; must pass the x86-64-v3 gate
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Assert native ${{ matrix.arch }} runner (no cross-compilation / emulation)
+        run: bash scripts/assert-native-runner.sh "${{ matrix.arch }}"
+
+      - name: Resolve native docker platform
+        id: plat
+        env:
+          PROFILE: ${{ matrix.profile }}
+          WANT_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # From the runner itself (asserted native above): the image is always native.
+          m="$(uname -m)"
+          [[ "${m}" == "${WANT_ARCH}" ]] || { echo "::error::runner is ${m}, matrix wants ${WANT_ARCH}" >&2; exit 1; }
+          case "${m}" in
+            aarch64) docker_arch=arm64 ;;
+            x86_64)  docker_arch=amd64 ;;
+            *) echo "::error::unsupported runner architecture ${m}" >&2; exit 1 ;;
+          esac
+          source scripts/config.env
+          [[ "${TARGET_PROFILE}" == "${PROFILE}" ]] \
+            || { echo "::error::config.env selects '${TARGET_PROFILE}' on ${m}, matrix wants '${PROFILE}'" >&2; exit 1; }
+          echo "docker_arch=${docker_arch}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve PGO training model (input or repo variable)
         id: model
@@ -57,28 +98,37 @@ jobs:
           echo "url=${url}" >> "$GITHUB_OUTPUT"
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve AL2023 aarch64 digest
+      - name: Resolve AL2023 ${{ matrix.arch }} digest
         id: img
+        env:
+          DOCKER_ARCH: ${{ steps.plat.outputs.docker_arch }}
         run: |
           set -euo pipefail
           # Resolved-and-recorded provenance, not a runtime pin (mirrors release.yml). Must
-          # select the arm64 manifest entry — an index/amd64 digest would exec-format-error.
+          # select THIS runner's manifest entry — an index/foreign digest would
+          # exec-format-error (or be emulated).
           source scripts/config.env
           digest="${AL2023_DIGEST:-}"
           if [[ -z "${digest}" ]]; then
             digest="$(docker manifest inspect amazonlinux:2023 \
-              | jq -r '.manifests[] | select(.platform.architecture=="arm64" and .platform.os=="linux") | .digest' \
+              | jq -r --arg a "${DOCKER_ARCH}" '.manifests[] | select(.platform.architecture==$a and .platform.os=="linux") | .digest' \
               | head -n1)"
           fi
-          [[ -n "${digest}" && "${digest}" != "null" ]] || { echo "could not resolve arm64 digest" >&2; exit 1; }
+          [[ -n "${digest}" && "${digest}" != "null" ]] || { echo "could not resolve ${DOCKER_ARCH} digest" >&2; exit 1; }
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "image=amazonlinux:2023@${digest}" >> "$GITHUB_OUTPUT"
 
-      - name: Build builder image (also proves the PGO deps llvm18 + compiler-rt resolve)
+      - name: Build builder image (native; also proves the PGO deps llvm18 + compiler-rt resolve)
+        env:
+          DOCKER_ARCH: ${{ steps.plat.outputs.docker_arch }}
         run: |
-          docker build --platform linux/arm64 \
+          set -euo pipefail
+          docker build --platform "linux/${DOCKER_ARCH}" \
             --build-arg AL2023_DIGEST="2023@${{ steps.img.outputs.digest }}" \
             -t static-llama-builder:ci .
+          img_arch="$(docker image inspect --format '{{.Architecture}}' static-llama-builder:ci)"
+          [[ "${img_arch}" == "${DOCKER_ARCH}" ]] \
+            || { echo "::error::builder image is ${img_arch}, runner is ${DOCKER_ARCH}" >&2; exit 1; }
 
       - name: Verify PGO toolchain present in image
         run: |
@@ -86,9 +136,11 @@ jobs:
             pd="$(command -v llvm-profdata-18 || command -v llvm-profdata || echo /usr/lib64/llvm18/bin/llvm-profdata)"
             [ -x "$pd" ] || { echo "::error::llvm-profdata not found in image"; exit 1; }
             "$pd" --version
-            # compiler-rt profile runtime (needed to link -fprofile-generate binaries).
-            find / -name "libclang_rt.profile-*.a" 2>/dev/null | head -n1 | grep . \
-              || { echo "::error::libclang_rt.profile not found (compiler-rt package missing)"; exit 1; }
+            # compiler-rt profile runtime for THIS arch (needed to link -fprofile-generate binaries).
+            a="$(uname -m)"
+            find / \( -name "libclang_rt.profile-${a}.a" -o -path "*/${a}-unknown-linux-gnu/libclang_rt.profile.a" \) 2>/dev/null \
+              | head -n1 | grep . \
+              || { echo "::error::libclang_rt.profile (${a}) not found (compiler-rt package missing)"; exit 1; }
           '
 
       - name: PGO build + bench + assertions (in container)
@@ -98,10 +150,14 @@ jobs:
           PGO_TRAIN_ITERS: ${{ inputs.pgo_train_iters }}
           MIN_PGO_GAIN: ${{ inputs.min_pgo_gain }}
           COMPILER_IMAGE: ${{ steps.img.outputs.image }}
+          PROFILE: ${{ matrix.profile }}
+          RUNNER_KIND: github-hosted
+          RUNNER_LABEL: ${{ matrix.runner }}
         run: |
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/work" -w /work \
             -e SMOKE_MODEL_URL -e SMOKE_MODEL_SHA256 -e PGO_TRAIN_ITERS -e MIN_PGO_GAIN -e COMPILER_IMAGE \
+            -e PROFILE -e RUNNER_KIND -e RUNNER_LABEL \
             static-llama-builder:ci bash -euo pipefail -c '
               git config --global --add safe.directory "*"
               # One model, used as BOTH PGO_TRAIN_MODEL and the bench workload model.
@@ -112,6 +168,7 @@ jobs:
 
               echo "::group::PGO build (instrument -> train -> optimize)"
               bash scripts/build.sh
+              bash scripts/verify-provenance.sh dist/build-info.json "${PROFILE}"
               echo "::endgroup::"
 
               echo "::group::PGO bench (pgo_gain + both-PGO parity)"
@@ -124,6 +181,11 @@ jobs:
               # --- assertions ---------------------------------------------------------
               jq -e ".pgo.enabled == true"         dist/build-info.json >/dev/null || { echo "::error::pgo not enabled in build-info.json"; exit 1; }
               jq -e ".pgo.profdata_sha256 != null" dist/build-info.json >/dev/null || { echo "::error::pgo.profdata_sha256 not recorded"; exit 1; }
+              # The profile was trained for THIS variant (never another architecture/baseline).
+              source scripts/config.env
+              jq -e --arg a "${TARGET_ARCH}" --arg b "${CPU_BASELINE}" \
+                ".pgo.architecture == \$a and .pgo.cpu_baseline == \$b" dist/build-info.json >/dev/null \
+                || { echo "::error::pgo profile architecture/baseline does not match ${TARGET_ARCH}/${CPU_BASELINE}"; exit 1; }
 
               gain="$(jq -r ".pgo_gain" "${RESULTS}/bench.json")"
               passed="$(jq -r ".passed"  "${RESULTS}/bench.json")"
@@ -141,7 +203,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: pgo-verify-evidence
+          name: pgo-verify-evidence-${{ matrix.profile }}
           path: |
             dist/build-info.json
             .build/results/bench.json
