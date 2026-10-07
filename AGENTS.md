@@ -104,6 +104,7 @@ enabled Cargo features
 bindings ABI
 compiled llama.cpp / llama-cpp-rs revisions
 dist/ layout
+build-info.json fields, including the merged smoke / benchmark / correctness results
 production target variants
 CPU baselines
 consumer-visible guarantees
@@ -172,7 +173,17 @@ syntax check for release validation.
 
 Shell changes should at least pass `bash -n`.
 
-Rust changes should pass `cargo fmt -- --check` for the affected harness.
+Rust changes should pass rustfmt under the toolchain pinned by `rust-toolchain.toml`. There
+is no workspace `Cargo.toml` at the repository root; `smoke/`, `bench/`, and `correctness/`
+are independent crates, so run the check per affected harness:
+
+```bash
+cargo fmt --manifest-path <harness>/Cargo.toml -- --check
+```
+
+The `lint` workflow runs both baseline checks on every push and pull request, so the tree
+is expected to be clean before a change starts. If a toolchain bump changes rustfmt output,
+reformat in a commit of its own rather than mixing it into an unrelated change.
 
 Release-affecting or architecture-sensitive changes must ultimately pass the native CI
 matrix for both production variants.

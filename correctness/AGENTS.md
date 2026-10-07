@@ -60,6 +60,10 @@ the production x86-64-v3 baseline.
 
 Treat these as an interface.
 
+The combined correctness result is merged verbatim into the released `build-info.json` as
+`.correctness` and gated on `passed == true` by `scripts/package.sh`. Adding that block
+was a contract bump, so changing its fields requires review against `CONTRACT.md`.
+
 Missing labels, invalid numerical data, and failed invariants must continue to fail closed.
 
 ## Dependencies

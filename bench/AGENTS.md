@@ -38,17 +38,23 @@ Treat these as benchmark methodology:
 Do not casually change them because that can make before/after performance results
 incomparable.
 
+The input text intentionally mirrors `scripts/pgo-train.cpp`, so the measured PGO gain
+reflects the sequence shape the profile was trained on. Change the two together.
+
 When methodology intentionally changes, update the surrounding benchmark assumptions and
 document why.
 
 ## Machine-readable results
 
-`scripts/bench.sh` consumes benchmark result fields.
+`scripts/bench.sh` consumes benchmark result fields and embeds the raw harness JSON
+verbatim in its own result, which `scripts/package.sh` merges into the released
+`build-info.json` as `.benchmark` and gates on `passed == true`.
 
-Treat field names and meanings as an interface between the Rust harness and shell
-orchestration.
+Treat field names and meanings as a published interface, not only one between the Rust
+harness and shell orchestration.
 
-Update both sides together when this interface changes.
+Update the harness and `scripts/bench.sh` together when this interface changes, and
+review the change against `CONTRACT.md`.
 
 ## Performance failures
 

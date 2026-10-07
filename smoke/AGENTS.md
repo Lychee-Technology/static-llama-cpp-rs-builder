@@ -34,10 +34,25 @@ Generated bindings must continue to come from `STATIC_LLAMA_BINDINGS`.
 
 Keep unsafe FFI operations localized and validate error/pointer results before use.
 
+## Model fixture
+
+The smoke model is fetched by `fixtures/fetch-model.sh` from the `SMOKE_MODEL_URL` /
+`SMOKE_MODEL_SHA256` repository variables. There is no default, and the fetch fails closed
+on a checksum mismatch.
+
+The same model is the benchmark workload and, for a PGO build, the training model.
+`scripts/correctness.sh` requires it to be byte-identical to the correctness reference GGUF
+pinned in `correctness/fixtures/reference-model.env`; changing either pin without the
+other fails the release at that check.
+
 ## Output behavior
 
-The release pipeline consumes the process exit status and optional machine-readable smoke
-result.
+The release pipeline consumes the process exit status and the machine-readable result
+written to `SMOKE_RESULT`.
+
+That result is required, not optional: `scripts/package.sh` refuses to package unless it
+exists with `passed == true`, and it is merged verbatim into the released
+`build-info.json` as `.smoke`. Changing its fields requires review against `CONTRACT.md`.
 
 Preserve that interface when refactoring.
 
