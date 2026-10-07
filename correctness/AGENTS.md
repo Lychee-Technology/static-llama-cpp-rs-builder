@@ -95,8 +95,9 @@ Run:
 cargo fmt --manifest-path correctness/Cargo.toml -- --check
 ```
 
-The crate has unit tests for the pure parts (fixture parsing, pooling-spec parsing, the
-reference label-coverage gate, and the committed `inputs.tsv`/`golden.tsv` pair agreeing).
+The crate has unit tests for the pure parts (inputs and emit/golden parsing, pooling-spec
+parsing, the reference label-coverage gate, and the committed `inputs.tsv`/`golden.tsv`
+pair agreeing). Keep parsing separate from file I/O so those tests need no temp files.
 They need the archives to link, so point `STATIC_LLAMA_DIR` at a `dist/`:
 
 ```bash
