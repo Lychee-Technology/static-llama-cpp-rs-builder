@@ -7,7 +7,12 @@
 //!
 //! Model path comes from $SMOKE_MODEL. Result JSON is written to $SMOKE_RESULT.
 
-#![allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code)]
+#![allow(
+    non_upper_case_globals,
+    non_camel_case_types,
+    non_snake_case,
+    dead_code
+)]
 
 mod llama {
     include!(env!("STATIC_LLAMA_BINDINGS"));
@@ -19,10 +24,7 @@ use std::process::exit;
 fn fail(msg: &str) -> ! {
     eprintln!("[smoke] FAIL: {msg}");
     if let Ok(path) = std::env::var("SMOKE_RESULT") {
-        let _ = std::fs::write(
-            path,
-            format!("{{\"passed\":false,\"error\":{msg:?}}}\n"),
-        );
+        let _ = std::fs::write(path, format!("{{\"passed\":false,\"error\":{msg:?}}}\n"));
     }
     exit(1);
 }
@@ -37,13 +39,18 @@ fn main() {
 
         let sysinfo = llama::llama_print_system_info();
         if !sysinfo.is_null() {
-            println!("[smoke] system info: {}", CStr::from_ptr(sysinfo).to_string_lossy());
+            println!(
+                "[smoke] system info: {}",
+                CStr::from_ptr(sysinfo).to_string_lossy()
+            );
         }
 
         let mparams = llama::llama_model_default_params();
         let model = llama::llama_model_load_from_file(c_model.as_ptr(), mparams);
         if model.is_null() {
-            fail(&format!("llama_model_load_from_file returned null for {model_path}"));
+            fail(&format!(
+                "llama_model_load_from_file returned null for {model_path}"
+            ));
         }
 
         let vocab = llama::llama_model_get_vocab(model);

@@ -1,0 +1,39 @@
+name: lint
+
+# Baseline validation that AGENTS.md prescribes for every change, enforced on every push to
+# main and every pull request so the tree always satisfies it:
+#   - rustfmt, under the toolchain pinned by rust-toolchain.toml, for the three independent
+#     harness crates (there is no workspace Cargo.toml at the repository root);
+#   - `bash -n` for every tracked shell script.
+#
+# This compiles nothing: no llama.cpp build, no artifact, no model, no container. It runs on
+# a plain hosted runner because it never produces or validates an artifact, so the
+# native-only rule for production builds (release.yml) does not apply. It is NOT a substitute
+# for the native release matrix.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: rustfmt (toolchain pinned by rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          cargo fmt --version
+          for m in smoke bench correctness; do
+            cargo fmt --manifest-path "${m}/Cargo.toml" -- --check
+          done
+
+      - name: bash -n (every tracked shell script)
+        run: |
+          set -euo pipefail
+          git ls-files -z -- '*.sh' | xargs -0 -n1 bash -n
