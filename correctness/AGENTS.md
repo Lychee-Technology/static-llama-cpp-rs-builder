@@ -72,7 +72,13 @@ for a generic emit, `last` for the golden) and requires the reference's label se
 inputs x poolings before any cosine is computed, naming every missing, unexpected or
 duplicate label. Keep that gate required for every `compare` call and keep it checking both
 directions; a reference that only partially covers `inputs.tsv` must never pass by having
-the uncovered rows skipped. The check adds no field to the result JSON.
+the uncovered rows skipped. A reference with no data rows fails it too, saying so
+explicitly. The check adds no field to the result JSON.
+
+The golden compare is unconditional: `scripts/correctness.sh` runs it on every invocation
+and counts it toward `passed`, so `golden_parity.status` is always `checked`, and a
+missing, empty or comment-only `golden.tsv` fails the gate (issue #9). Do not reintroduce a
+row-count guard, a non-fatal skip, or an opt-out around it.
 
 ## Dependencies
 
@@ -89,8 +95,9 @@ Run:
 cargo fmt --manifest-path correctness/Cargo.toml -- --check
 ```
 
-The crate has unit tests for the pure parts (fixture parsing, pooling-spec parsing, the
-reference label-coverage gate, and the committed `inputs.tsv`/`golden.tsv` pair agreeing).
+The crate has unit tests for the pure parts (inputs and emit/golden parsing, pooling-spec
+parsing, the reference label-coverage gate, and the committed `inputs.tsv`/`golden.tsv`
+pair agreeing). Keep parsing separate from file I/O so those tests need no temp files.
 They need the archives to link, so point `STATIC_LLAMA_DIR` at a `dist/`:
 
 ```bash

@@ -19,8 +19,9 @@
 #                        mirroring the downstream GGUF-vs-FP32 benchmark. IQ4_NL vs FP32,
 #                        so the threshold allows quantization error. The golden must cover
 #                        inputs.tsv exactly (label set == every row x LAST, fail-closed in
-#                        both directions), so a stale golden cannot pass. Skipped (recorded,
-#                        non-fatal) until golden.tsv has data rows.
+#                        both directions), so a stale golden cannot pass. REQUIRED on every
+#                        run: a missing, empty or comment-only golden.tsv FAILS the gate
+#                        (there is no non-fatal skip).
 #   §4 self-consistency  Determinism / batch-invariance / thread-invariance / semantic
 #                        sanity on the tuned build (reference-free).
 #
@@ -204,18 +205,12 @@ set +e
 compare "${E_TUNED_REF}" "${E_GEN_REF}" "${EMIT_POOLINGS}" "${TUNED_GENERIC_MIN_COS}" "${RESULTS}/correctness.generic.ref.json"
 [[ "${HAVE_SMOKE}" == 1 ]] && compare "${E_TUNED_SMK}" "${E_GEN_SMK}" "${EMIT_POOLINGS}" "${TUNED_GENERIC_MIN_COS}" "${RESULTS}/correctness.generic.smoke.json"
 
-# §1 golden: only if golden.tsv has data rows (non-comment, non-blank). Once it has any,
-# `compare` requires its label set to equal every inputs.tsv row x LAST (see above).
-# grep -c prints "0" AND exits 1 when there are no matches, so capture with `|| true`
-# (NOT `|| echo 0`, which would append a second line and break the arithmetic test).
-GOLDEN_STATUS="not_generated"
-GOLDEN_ROWS="$(grep -cvE '^[[:space:]]*(#.*)?$' "${GOLDEN}" 2>/dev/null || true)"
-if [[ "${GOLDEN_ROWS:-0}" -gt 0 ]]; then
-  GOLDEN_STATUS="checked"
-  compare "${E_TUNED_REF}" "${GOLDEN}" "${GOLDEN_POOLINGS}" "${GOLDEN_MIN_COS}" "${RESULTS}/correctness.golden.ref.json"
-else
-  log "golden.tsv has no data rows — §1 golden parity SKIPPED (run scripts/gen-golden.sh). §2/§4 still gate."
-fi
+# §1 golden parity is REQUIRED on every run; it is never skipped. `compare` fails closed,
+# naming golden.tsv, when the file is missing or unreadable, has no data rows (truncated,
+# emptied or comment-only), or when its label set differs from every inputs.tsv row x LAST
+# (see above). Regenerate it with scripts/gen-golden.sh. (Issue #9: the former "no data
+# rows => non-fatal not_generated skip" let an emptied golden drop §1 from the release gate.)
+compare "${E_TUNED_REF}" "${GOLDEN}" "${GOLDEN_POOLINGS}" "${GOLDEN_MIN_COS}" "${RESULTS}/correctness.golden.ref.json"
 set -e
 
 # --- 5. Combine into correctness.json + gate ---------------------------------------
@@ -224,22 +219,25 @@ pass_of()  { jq -r '.passed // false' <<<"$(read_json "$1")"; }
 
 SELF_REF="$(read_json "${RESULTS}/correctness.self.ref.json")"
 GEN_REF="$(read_json "${RESULTS}/correctness.generic.ref.json")"
-SELF_SMK="null"; GEN_SMK="null"; GOLDEN_JSON="null"
+GOLDEN_JSON="$(read_json "${RESULTS}/correctness.golden.ref.json")"
+SELF_SMK="null"; GEN_SMK="null"
 if [[ "${HAVE_SMOKE}" == 1 ]]; then
   SELF_SMK="$(read_json "${RESULTS}/correctness.self.smoke.json")"
   GEN_SMK="$(read_json "${RESULTS}/correctness.generic.smoke.json")"
 fi
-[[ "${GOLDEN_STATUS}" == "checked" ]] && GOLDEN_JSON="$(read_json "${RESULTS}/correctness.golden.ref.json")"
 
-# Overall pass = every REQUIRED sub-check passed. Golden only counts when checked.
+# Overall pass = every REQUIRED sub-check passed. The golden compare is always required.
 all_pass=true
-required=("${RESULTS}/correctness.self.ref.json" "${RESULTS}/correctness.generic.ref.json")
+required=("${RESULTS}/correctness.self.ref.json" "${RESULTS}/correctness.generic.ref.json" "${RESULTS}/correctness.golden.ref.json")
 [[ "${HAVE_SMOKE}" == 1 ]] && required+=("${RESULTS}/correctness.self.smoke.json" "${RESULTS}/correctness.generic.smoke.json")
-[[ "${GOLDEN_STATUS}" == "checked" ]] && required+=("${RESULTS}/correctness.golden.ref.json")
 for f in "${required[@]}"; do
   [[ "$(pass_of "$f")" == "true" ]] || all_pass=false
 done
+GOLDEN_PASS="$(pass_of "${RESULTS}/correctness.golden.ref.json")"
 
+# golden_parity.status is part of the consumer-visible .correctness schema (CONTRACT.md).
+# §1 now always runs, so it is always "checked" (pass/fail is .golden_parity.reference.passed);
+# the field is kept, as a constant, so the merged build-info.json shape is unchanged.
 jq -n \
   --argjson passed        "${all_pass}" \
   --arg     coverage      "${HW_COVERAGE}" \
@@ -250,7 +248,6 @@ jq -n \
   --arg     gen_defs      "${GENERIC_REF_GGML_DEFINES}" \
   --argjson gen_cos_min   "${TUNED_GENERIC_MIN_COS}" \
   --argjson golden_cos_min "${GOLDEN_MIN_COS}" \
-  --arg     golden_status "${GOLDEN_STATUS}" \
   --argjson self_ref      "${SELF_REF}" \
   --argjson self_smoke    "${SELF_SMK}" \
   --argjson gen_ref       "${GEN_REF}" \
@@ -263,11 +260,11 @@ jq -n \
                                          production:false, published:false, supported:false,
                                          note:"non-production correctness reference only; not an artifact, not published, not part of the support matrix"},
                       reference:$gen_ref, deployed:$gen_smoke},
-    golden_parity:{status:$golden_status, min_cosine_threshold:$golden_cos_min, reference:$golden},
+    golden_parity:{status:"checked", min_cosine_threshold:$golden_cos_min, reference:$golden},
     self_consistency:{reference:$self_ref, deployed:$self_smoke}}' \
   > "${RESULTS}/correctness.json"
 
-log "wrote ${RESULTS}/correctness.json (passed=${all_pass}, golden=${GOLDEN_STATUS})"
+log "wrote ${RESULTS}/correctness.json (passed=${all_pass}, golden_parity passed=${GOLDEN_PASS})"
 if [[ "${all_pass}" != "true" ]]; then
   echo "[correct] FAIL: one or more correctness checks did not pass (see correctness.json)" >&2
   exit 1

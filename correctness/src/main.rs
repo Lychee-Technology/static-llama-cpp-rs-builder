@@ -24,9 +24,10 @@
 //!              in $CORRECTNESS_REF_POOLINGS (comma-separated, e.g. `last` for the golden,
 //!              `mean,last` for a generic emit) — fail-closed in both directions, naming
 //!              the labels, so an inputs.tsv row added, removed or renamed without
-//!              regenerating the golden can never pass by being silently skipped. Then
-//!              require cosine >= $CORRECTNESS_THRESHOLD for every B label, and FAIL if any
-//!              B label is missing from A. Writes $CORRECTNESS_RESULT.
+//!              regenerating the golden can never pass by being silently skipped, and a
+//!              B with no data rows at all (truncated, emptied or comment-only) fails the
+//!              same way. Then require cosine >= $CORRECTNESS_THRESHOLD for every B label,
+//!              and FAIL if any B label is missing from A. Writes $CORRECTNESS_RESULT.
 //!
 //! Inputs fixture path: $CORRECTNESS_INPUTS (TSV: `id<TAB>role<TAB>group<TAB>text`, `#` comments).
 //! Also prints llama_print_system_info() so compiled-in CPU features sit next to numbers.
@@ -177,7 +178,10 @@ fn parse_ref_poolings(spec: &str) -> Result<Vec<&str>, String> {
 //     renamed) without regenerating the reference, so it would otherwise be skipped;
 //   - a reference label no input produces: a row was removed or renamed, so the reference
 //     is stale;
-//   - a duplicate reference label: ambiguous, so it is never accepted.
+//   - a duplicate reference label: ambiguous, so it is never accepted;
+//   - no reference label at all (a truncated, emptied or comment-only file): every expected
+//     label is absent, and the message says so explicitly. This is the whole golden check
+//     for that case — scripts/correctness.sh has no "empty golden" skip (issue #9).
 fn check_reference_coverage(
     inputs: &[Input],
     poolings: &[&str],
@@ -200,6 +204,9 @@ fn check_reference_coverage(
         return Ok(());
     }
     let mut why: Vec<String> = Vec::new();
+    if ref_labels.is_empty() {
+        why.push("the reference has no data rows".to_string());
+    }
     if !missing.is_empty() {
         why.push(format!(
             "{} expected label(s) absent from the reference: {}",
@@ -576,8 +583,10 @@ thread(min_cos={thread_cos_min:.5}) semantic(para={para_cos:.4} unrel={unrel_cos
 
 // ---- compare ----------------------------------------------------------------------
 
-fn read_emit(path: &str) -> Vec<(String, Vec<f32>)> {
-    let body = std::fs::read_to_string(path).unwrap_or_else(|e| fail(&format!("read {path}: {e}")));
+// Emit / golden TSV: `label<TAB>f0,f1,...`, `#` comments. A body with no data rows parses
+// to an empty Vec on purpose: `compare` rejects that through check_reference_coverage,
+// which names every absent label (issue #9), so there is no separate "no rows" error here.
+fn parse_emit(body: &str) -> Result<Vec<(String, Vec<f32>)>, String> {
     let mut out = Vec::new();
     for line in body.lines() {
         if line.trim().is_empty() || line.trim_start().starts_with('#') {
@@ -587,19 +596,24 @@ fn read_emit(path: &str) -> Vec<(String, Vec<f32>)> {
         let label = it.next().unwrap_or("").to_string();
         let csv = it.next().unwrap_or("");
         if label.is_empty() || csv.is_empty() {
-            fail(&format!("malformed emit line in {path}: {line:?}"));
+            return Err(format!("malformed emit line: {line:?}"));
         }
         let v: Vec<f32> = csv
             .split(',')
             .map(|s| {
                 s.trim()
                     .parse::<f32>()
-                    .unwrap_or_else(|_| fail(&format!("bad float in {path}: {s:?}")))
+                    .map_err(|_| format!("bad float: {s:?}"))
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         out.push((label, v));
     }
-    out
+    Ok(out)
+}
+
+fn read_emit(path: &str) -> Vec<(String, Vec<f32>)> {
+    let body = std::fs::read_to_string(path).unwrap_or_else(|e| fail(&format!("read {path}: {e}")));
+    parse_emit(&body).unwrap_or_else(|e| fail(&format!("{path}: {e}")))
 }
 
 fn mode_compare() {
@@ -789,6 +803,7 @@ para1_b\tdocument\tpara1\tSame, reworded\n";
             "{err}"
         );
         assert!(!err.contains("no input produces"), "{err}");
+        assert!(!err.contains("no data rows"), "{err}");
     }
 
     // A removed or renamed row leaves a stale golden label: still fails, naming it.
@@ -839,7 +854,59 @@ para1_b\tdocument\tpara1\tSame, reworded\n";
             "{err}"
         );
         let err = check_reference_coverage(&inputs(), &["last"], &[]).unwrap_err();
+        assert!(err.contains("the reference has no data rows"), "{err}");
         assert!(err.contains("4 expected label(s) absent"), "{err}");
+    }
+
+    #[test]
+    fn parse_emit_skips_comments_and_blank_lines() {
+        let rows = parse_emit("# header\n\nq1|last\t1, -2.5,3e-1\n  # note\nd1|mean\t0\n").unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("q1|last".to_string(), vec![1.0, -2.5, 0.3]),
+                ("d1|mean".to_string(), vec![0.0]),
+            ]
+        );
+    }
+
+    // Unparseable emit data fails closed instead of being skipped or zero-filled.
+    #[test]
+    fn parse_emit_rejects_malformed_lines_and_bad_floats() {
+        for bad in ["q1|last\n", "q1|last\t\n", "\t1,2\n"] {
+            assert!(
+                parse_emit(bad).unwrap_err().contains("malformed emit line"),
+                "{bad:?}"
+            );
+        }
+        assert!(parse_emit("q1|last\t1,x,3\n")
+            .unwrap_err()
+            .contains("bad float: \"x\""));
+        assert!(parse_emit("q1|last\t1,,3\n")
+            .unwrap_err()
+            .contains("bad float: \"\""));
+    }
+
+    // Issue #9: a golden.tsv that was truncated, emptied or left comment-only (a bad merge,
+    // a stray `> golden.tsv`) must fail the golden check, not degrade it to a skip. It
+    // parses to no labels (read_emit is parse_emit plus the read, whose error already
+    // names the file), and the coverage gate rejects that explicitly.
+    #[test]
+    fn comment_only_reference_yields_no_labels_and_fails_coverage() {
+        let golden = parse_emit(
+            "# GOLDEN reference embeddings (§1). label<TAB>f0,f1,...\n\
+             # DO NOT EDIT BY HAND.\n\
+             \n",
+        )
+        .unwrap();
+        assert!(golden.is_empty());
+        let golden_labels: Vec<String> = golden.iter().map(|(l, _)| l.clone()).collect();
+        let err = check_reference_coverage(&inputs(), &["last"], &golden_labels).unwrap_err();
+        assert!(err.contains("the reference has no data rows"), "{err}");
+        assert!(
+            err.contains("4 expected label(s) absent from the reference: d1|last, para1_a|last, para1_b|last, q1|last"),
+            "{err}"
+        );
     }
 
     // The committed fixture pair must pass the gate unchanged: every inputs.tsv row has

@@ -230,8 +230,16 @@ additionally the deployed smoke/PGO model:
   and committed golden vectors produced offline by the **FP32 PyTorch** model via
   sentence-transformers (`scripts/gen-golden.py` → `correctness/fixtures/golden.tsv`).
   Independent of the GGUF/llama.cpp path — it mirrors the downstream GGUF-vs-FP32 benchmark
-  that caught `v0.1.151-1`. Until that file has data rows the golden check is recorded as
-  `not_generated` and is non-fatal, while §2 and §4 still gate.
+  that caught `v0.1.151-1`. The golden check is **required on every run and is never
+  skipped**: `scripts/correctness.sh` fails, naming `correctness/fixtures/golden.tsv`, when
+  that file is missing, has no data rows (truncated, emptied or comment-only), or when its
+  label set does not equal every `inputs.tsv` row × `last` (fail-closed in both directions,
+  naming the labels). `correctness.golden_parity.status` is therefore always `checked`, and
+  `correctness.golden_parity.reference.passed` carries the result; a release with
+  `correctness.passed == true` has passed golden parity. (Before issue #9 a golden with no
+  data rows was recorded as a non-fatal `not_generated`; that status is no longer reachable.
+  No published release ever carried it: `v0.1.151-2`, the first release with the gate, was
+  built from the populated golden.)
   - **Threshold justification (0.98, vs issue #4's 0.99):** the deployed/reference GGUF is
     **IQ4_NL — a 4-bit quantization**, so `cosine(IQ4_NL, FP32)` is floored by quantization
     error, not runtime error (measured worst input `0.9845`; issue #4's `0.99` assumed a
