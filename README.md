@@ -79,8 +79,11 @@ build image. CI gates the environment envelope (`EXPECTED_CLANG_MAJOR`, `MIN_GLI
       `build-info.json`.
 2. **smoke** (`smoke/`): links the archives and runs a real embedding/context-init test.
 3. `scripts/correctness.sh` compares the tuned build against a generic reference build of
-   the same revision, and also runs golden parity and self-consistency checks. The generic
-   reference is `-march=armv8-a` on ARM64 and `-march=x86-64` on x86-64. It is a
+   the same revision, and also runs golden parity and self-consistency checks. Every
+   comparison first requires the reference's label set to equal the rows of
+   `correctness/fixtures/inputs.tsv` times the expected poolings, so a golden that is stale
+   against the inputs fixture fails naming the labels instead of silently skipping rows. The
+   generic reference is `-march=armv8-a` on ARM64 and `-march=x86-64` on x86-64. It is a
    **non-production comparison build only**: it is not an artifact, it is never published,
    it is not part of the support matrix, and it does not mean older x86 CPUs are
    supported.

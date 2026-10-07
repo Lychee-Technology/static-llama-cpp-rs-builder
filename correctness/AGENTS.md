@@ -66,6 +66,14 @@ was a contract bump, so changing its fields requires review against `CONTRACT.md
 
 Missing labels, invalid numerical data, and failed invariants must continue to fail closed.
 
+The `compare` mode takes the inputs fixture (`CORRECTNESS_INPUTS`) and the poolings the
+reference is expected to carry (`CORRECTNESS_REF_POOLINGS`, comma-separated: `mean,last`
+for a generic emit, `last` for the golden) and requires the reference's label set to equal
+inputs x poolings before any cosine is computed, naming every missing, unexpected or
+duplicate label. Keep that gate required for every `compare` call and keep it checking both
+directions; a reference that only partially covers `inputs.tsv` must never pass by having
+the uncovered rows skipped. The check adds no field to the result JSON.
+
 ## Dependencies
 
 Keep the crate dependency-free where practical.
@@ -79,6 +87,14 @@ Run:
 
 ```bash
 cargo fmt --manifest-path correctness/Cargo.toml -- --check
+```
+
+The crate has unit tests for the pure parts (fixture parsing, pooling-spec parsing, the
+reference label-coverage gate, and the committed `inputs.tsv`/`golden.tsv` pair agreeing).
+They need the archives to link, so point `STATIC_LLAMA_DIR` at a `dist/`:
+
+```bash
+STATIC_LLAMA_DIR="$PWD/dist" cargo test --manifest-path correctness/Cargo.toml
 ```
 
 For numerical behavior changes, run:
