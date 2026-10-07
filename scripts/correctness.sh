@@ -17,7 +17,9 @@
 #                        offline by scripts/gen-golden.py (the PyTorch model via
 #                        sentence-transformers) — independent of the GGUF/llama.cpp path,
 #                        mirroring the downstream GGUF-vs-FP32 benchmark. IQ4_NL vs FP32,
-#                        so the threshold allows quantization error. Skipped (recorded,
+#                        so the threshold allows quantization error. The golden must cover
+#                        inputs.tsv exactly (label set == every row x LAST, fail-closed in
+#                        both directions), so a stale golden cannot pass. Skipped (recorded,
 #                        non-fatal) until golden.tsv has data rows.
 #   §4 self-consistency  Determinism / batch-invariance / thread-invariance / semantic
 #                        sanity on the tuned build (reference-free).
@@ -54,6 +56,14 @@ else
   # Only the CPU this ran on is covered (recorded verbatim; no wider claim).
   HW_COVERAGE="x86_64 (x86-64-v3): ${HOST_CPU_MODEL:-unknown CPU} only"
 fi
+
+# Label coverage a `compare` reference must have. The crate emits `<id>|<pooling>` for every
+# inputs.tsv row x every pooling it exercises, and `compare` requires the reference's label
+# set to EQUAL inputs x the poolings declared here (fail-closed in both directions, naming
+# the labels), so a reference that is stale against inputs.tsv can never pass by having
+# the missing input silently skipped.
+EMIT_POOLINGS="mean,last"   # every pooling the crate emits (POOLINGS in correctness/src/main.rs)
+GOLDEN_POOLINGS="last"      # scripts/gen-golden.py writes LAST only (jina's deployment pooling)
 
 mkdir -p "${RESULTS}"
 log() { printf '\033[1;34m[correct]\033[0m %s\n' "$*"; }
@@ -142,9 +152,10 @@ selfcheck() {  # model, static_dir, out_result  (may exit 1 => caller uses set +
   CORRECTNESS_MODE=selfcheck CORRECTNESS_MODEL="$1" STATIC_LLAMA_DIR="$2" \
     CORRECTNESS_INPUTS="${INPUTS}" CORRECTNESS_RESULT="$3" ${CARGO}
 }
-compare() {  # a_emit, b_emit, threshold, out_result  (may exit 1)
+compare() {  # a_emit, b_ref, ref_poolings, threshold, out_result  (may exit 1)
   CORRECTNESS_MODE=compare STATIC_LLAMA_DIR="${GENERIC_DIST}" \
-    CORRECTNESS_A="$1" CORRECTNESS_B="$2" CORRECTNESS_THRESHOLD="$3" CORRECTNESS_RESULT="$4" ${CARGO}
+    CORRECTNESS_A="$1" CORRECTNESS_B="$2" CORRECTNESS_INPUTS="${INPUTS}" CORRECTNESS_REF_POOLINGS="$3" \
+    CORRECTNESS_THRESHOLD="$4" CORRECTNESS_RESULT="$5" ${CARGO}
 }
 
 E_TUNED_REF="${RESULTS}/emit.ref.tuned.tsv"
@@ -190,17 +201,18 @@ emit "${REF_MODEL}" "${GENERIC_DIST}" "${E_GEN_REF}"
 
 # --- 3/4. Comparisons (may exit 1) -------------------------------------------------
 set +e
-compare "${E_TUNED_REF}" "${E_GEN_REF}" "${TUNED_GENERIC_MIN_COS}" "${RESULTS}/correctness.generic.ref.json"
-[[ "${HAVE_SMOKE}" == 1 ]] && compare "${E_TUNED_SMK}" "${E_GEN_SMK}" "${TUNED_GENERIC_MIN_COS}" "${RESULTS}/correctness.generic.smoke.json"
+compare "${E_TUNED_REF}" "${E_GEN_REF}" "${EMIT_POOLINGS}" "${TUNED_GENERIC_MIN_COS}" "${RESULTS}/correctness.generic.ref.json"
+[[ "${HAVE_SMOKE}" == 1 ]] && compare "${E_TUNED_SMK}" "${E_GEN_SMK}" "${EMIT_POOLINGS}" "${TUNED_GENERIC_MIN_COS}" "${RESULTS}/correctness.generic.smoke.json"
 
-# §1 golden: only if golden.tsv has data rows (non-comment, non-blank).
+# §1 golden: only if golden.tsv has data rows (non-comment, non-blank). Once it has any,
+# `compare` requires its label set to equal every inputs.tsv row x LAST (see above).
 # grep -c prints "0" AND exits 1 when there are no matches, so capture with `|| true`
 # (NOT `|| echo 0`, which would append a second line and break the arithmetic test).
 GOLDEN_STATUS="not_generated"
 GOLDEN_ROWS="$(grep -cvE '^[[:space:]]*(#.*)?$' "${GOLDEN}" 2>/dev/null || true)"
 if [[ "${GOLDEN_ROWS:-0}" -gt 0 ]]; then
   GOLDEN_STATUS="checked"
-  compare "${E_TUNED_REF}" "${GOLDEN}" "${GOLDEN_MIN_COS}" "${RESULTS}/correctness.golden.ref.json"
+  compare "${E_TUNED_REF}" "${GOLDEN}" "${GOLDEN_POOLINGS}" "${GOLDEN_MIN_COS}" "${RESULTS}/correctness.golden.ref.json"
 else
   log "golden.tsv has no data rows — §1 golden parity SKIPPED (run scripts/gen-golden.sh). §2/§4 still gate."
 fi

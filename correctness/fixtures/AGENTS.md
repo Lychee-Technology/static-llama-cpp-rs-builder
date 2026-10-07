@@ -35,11 +35,16 @@ of the golden is to provide an independent reference.
 Input rows define correctness coverage.
 
 Adding, removing, or modifying rows changes what the release gate proves, and requires
-regenerating `golden.tsv` in the same change. The golden comparison iterates over the
-golden labels only. Against a stale golden, a removed input fails closed because its label
-is missing from the emit, an edited input is caught only if its vector drifts below the
-threshold, and an added input with no golden row is silently left out of FP32 golden
-parity while the gate still passes.
+regenerating `golden.tsv` in the same change. Before comparing any vectors, the `compare`
+mode of the correctness crate requires the golden's label set to equal `<id>|last` over
+every row of `inputs.tsv`, in both directions, and fails naming the offending labels. So
+against a stale golden an added input fails closed (its `<id>|last` is absent from the
+golden), a removed or renamed input fails closed (the golden carries a label no input
+produces), and a duplicated or `|`-containing id is rejected when the fixture is parsed. An
+edited input that keeps its id is the one case the label gate cannot see: it is caught only
+if its vector drifts below the threshold, which is why regeneration is required for every
+row change, not just additions and removals. The gate is only reached once `golden.tsv` has
+data rows; an empty golden is still the documented non-fatal `not_generated` skip.
 
 The rows whose group starts with `para` and `unrel` are the paraphrase and unrelated pairs
 for the self-consistency semantic-sanity check. Each needs at least two rows.

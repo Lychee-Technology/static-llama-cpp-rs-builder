@@ -19,9 +19,14 @@
 //!              $CORRECTNESS_RESULT.
 //!
 //!   compare    Pure (no llama): read two emit files A (packaged-archive emit) and B (the
-//!              reference: generic emit or the golden), require cosine >=
-//!              $CORRECTNESS_THRESHOLD for every B label, and FAIL if any B label is
-//!              missing from A. Writes $CORRECTNESS_RESULT.
+//!              reference: generic emit or the golden). First require B's label set to
+//!              EQUAL `<id>|<pooling>` over every row of the inputs fixture x every pooling
+//!              in $CORRECTNESS_REF_POOLINGS (comma-separated, e.g. `last` for the golden,
+//!              `mean,last` for a generic emit) — fail-closed in both directions, naming
+//!              the labels, so an inputs.tsv row added, removed or renamed without
+//!              regenerating the golden can never pass by being silently skipped. Then
+//!              require cosine >= $CORRECTNESS_THRESHOLD for every B label, and FAIL if any
+//!              B label is missing from A. Writes $CORRECTNESS_RESULT.
 //!
 //! Inputs fixture path: $CORRECTNESS_INPUTS (TSV: `id<TAB>role<TAB>group<TAB>text`, `#` comments).
 //! Also prints llama_print_system_info() so compiled-in CPU features sit next to numbers.
@@ -37,6 +42,7 @@ mod llama {
     include!(env!("STATIC_LLAMA_BINDINGS"));
 }
 
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::{CStr, CString};
 use std::process::exit;
 
@@ -63,6 +69,7 @@ fn env_or_fail(key: &str) -> String {
 const QUERY_PREFIX: &str = "Query: ";
 const DOCUMENT_PREFIX: &str = "Document: ";
 
+#[derive(Debug)]
 struct Input {
     id: String,
     role: String, // "query" | "document" (selects the task prefix)
@@ -85,11 +92,14 @@ impl Input {
     }
 }
 
-fn load_inputs() -> Vec<Input> {
-    let path = env_or_fail("CORRECTNESS_INPUTS");
-    let body =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| fail(&format!("read {path}: {e}")));
-    let mut out = Vec::new();
+// Emit/golden label for one input under one pooling. The single definition of the label
+// format on the llama.cpp side; scripts/gen-golden.py writes the same `<id>|last`.
+fn label(id: &str, pooling: &str) -> String {
+    format!("{id}|{pooling}")
+}
+
+fn parse_inputs(body: &str) -> Result<Vec<Input>, String> {
+    let mut out: Vec<Input> = Vec::new();
     for line in body.lines() {
         let line = line.trim_end_matches(['\r', '\n']);
         if line.trim().is_empty() || line.trim_start().starts_with('#') {
@@ -100,6 +110,15 @@ fn load_inputs() -> Vec<Input> {
             (Some(id), Some(role), Some(group), Some(text))
                 if !id.is_empty() && !role.is_empty() && !text.is_empty() =>
             {
+                // The id is the label key (`<id>|<pooling>`): a duplicate would let one
+                // row's vector shadow another's in `compare`, and a '|' would make the
+                // label ambiguous. Both are fixture errors, never silently accepted.
+                if id.contains('|') {
+                    return Err(format!("input id {id:?} must not contain '|'"));
+                }
+                if out.iter().any(|i| i.id == id) {
+                    return Err(format!("duplicate input id {id:?}"));
+                }
                 out.push(Input {
                     id: id.to_string(),
                     role: role.to_string(),
@@ -107,15 +126,108 @@ fn load_inputs() -> Vec<Input> {
                     text: text.to_string(),
                 });
             }
-            _ => fail(&format!(
-                "malformed inputs line (need id<TAB>role<TAB>group<TAB>text): {line:?}"
-            )),
+            _ => {
+                return Err(format!(
+                    "malformed inputs line (need id<TAB>role<TAB>group<TAB>text): {line:?}"
+                ))
+            }
         }
     }
     if out.is_empty() {
-        fail("inputs fixture has no rows");
+        return Err("inputs fixture has no rows".to_string());
     }
-    out
+    Ok(out)
+}
+
+fn load_inputs_at(path: &str) -> Vec<Input> {
+    let body = std::fs::read_to_string(path).unwrap_or_else(|e| fail(&format!("read {path}: {e}")));
+    parse_inputs(&body).unwrap_or_else(|e| fail(&format!("{path}: {e}")))
+}
+
+fn load_inputs() -> Vec<Input> {
+    load_inputs_at(&env_or_fail("CORRECTNESS_INPUTS"))
+}
+
+// $CORRECTNESS_REF_POOLINGS: the poolings a compare reference must cover, comma-separated,
+// each a POOLINGS name (an unknown name or an empty list is an error, never "no check").
+fn parse_ref_poolings(spec: &str) -> Result<Vec<&str>, String> {
+    let known: Vec<&str> = POOLINGS.iter().map(|(name, _)| *name).collect();
+    let mut out: Vec<&str> = Vec::new();
+    for p in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        if !known.contains(&p) {
+            return Err(format!(
+                "unknown pooling {p:?} (known: {})",
+                known.join(",")
+            ));
+        }
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    if out.is_empty() {
+        return Err(format!("no poolings given (known: {})", known.join(",")));
+    }
+    Ok(out)
+}
+
+// Fail-closed coverage check for a compare reference (generic emit or golden): its label
+// set must EQUAL `<id>|<pooling>` over every input x every requested pooling. Both
+// directions are errors, and the message names the labels:
+//   - an expected label absent from the reference: an inputs.tsv row was added (or
+//     renamed) without regenerating the reference, so it would otherwise be skipped;
+//   - a reference label no input produces: a row was removed or renamed, so the reference
+//     is stale;
+//   - a duplicate reference label: ambiguous, so it is never accepted.
+fn check_reference_coverage(
+    inputs: &[Input],
+    poolings: &[&str],
+    ref_labels: &[String],
+) -> Result<(), String> {
+    let expected: BTreeSet<String> = inputs
+        .iter()
+        .flat_map(|i| poolings.iter().map(move |p| label(&i.id, p)))
+        .collect();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut duplicate: Vec<String> = Vec::new();
+    for l in ref_labels {
+        if !seen.insert(l.clone()) {
+            duplicate.push(l.clone());
+        }
+    }
+    let missing: Vec<String> = expected.difference(&seen).cloned().collect();
+    let unexpected: Vec<String> = seen.difference(&expected).cloned().collect();
+    if missing.is_empty() && unexpected.is_empty() && duplicate.is_empty() {
+        return Ok(());
+    }
+    let mut why: Vec<String> = Vec::new();
+    if !missing.is_empty() {
+        why.push(format!(
+            "{} expected label(s) absent from the reference: {}",
+            missing.len(),
+            missing.join(", ")
+        ));
+    }
+    if !unexpected.is_empty() {
+        why.push(format!(
+            "{} reference label(s) that no input produces: {}",
+            unexpected.len(),
+            unexpected.join(", ")
+        ));
+    }
+    if !duplicate.is_empty() {
+        why.push(format!(
+            "{} duplicate reference label(s): {}",
+            duplicate.len(),
+            duplicate.join(", ")
+        ));
+    }
+    Err(format!(
+        "reference label set != inputs x [{}] ({} input(s), {} expected label(s)): {}",
+        poolings.join(","),
+        inputs.len(),
+        expected.len(),
+        why.join("; ")
+    ))
 }
 
 // ---- math -------------------------------------------------------------------------
@@ -332,7 +444,8 @@ fn mode_emit() {
             let ctx = eng.context(pool, llama::LLAMA_ATTENTION_TYPE_NON_CAUSAL, 0);
             for inp in &inputs {
                 let v = eng.embed_single(ctx, &inp.prefixed());
-                out.push_str(&format!("{}|{}\t", inp.id, pname));
+                out.push_str(&label(&inp.id, pname));
+                out.push('\t');
                 for (k, x) in v.iter().enumerate() {
                     if k > 0 {
                         out.push(',');
@@ -496,15 +609,33 @@ fn mode_compare() {
     let threshold: f32 = env_or_fail("CORRECTNESS_THRESHOLD")
         .parse()
         .unwrap_or_else(|_| fail("CORRECTNESS_THRESHOLD not a float"));
+    let inputs_path = env_or_fail("CORRECTNESS_INPUTS");
+    let inputs = load_inputs_at(&inputs_path);
+    let ref_poolings_spec = env_or_fail("CORRECTNESS_REF_POOLINGS");
+    let ref_poolings = parse_ref_poolings(&ref_poolings_spec)
+        .unwrap_or_else(|e| fail(&format!("$CORRECTNESS_REF_POOLINGS: {e}")));
 
     // A = the packaged-archive emit (superset: every input x MEAN and LAST). B = the
-    // REFERENCE side (generic emit, or the golden). Every reference label MUST be present
-    // in A and matched — a reference/golden label missing from the emit is a hard failure
-    // (a stale/incomplete golden, or an emit missing a pooling/input, must never pass by
-    // being silently skipped).
-    let a: std::collections::HashMap<String, Vec<f32>> = read_emit(&a_path).into_iter().collect();
+    // REFERENCE side (generic emit, or the golden).
+    //
+    // B must cover the inputs fixture exactly: label set == inputs x ref_poolings. The
+    // comparison below iterates B, so without this a B that is MISSING an input (an
+    // inputs.tsv row added without regenerating the golden) would leave that input out of
+    // the parity check while the gate still passes. A B label that no input produces is a
+    // stale reference and fails too.
+    let a: HashMap<String, Vec<f32>> = read_emit(&a_path).into_iter().collect();
     let b = read_emit(&b_path);
+    let b_labels: Vec<String> = b.iter().map(|(l, _)| l.clone()).collect();
+    if let Err(e) = check_reference_coverage(&inputs, &ref_poolings, &b_labels) {
+        fail(&format!(
+            "reference {b_path} does not cover inputs {inputs_path}: {e}. Regenerate the \
+reference for the current inputs fixture (golden: scripts/gen-golden.sh)"
+        ));
+    }
 
+    // Every reference label MUST then be present in A and matched — a reference label
+    // missing from the emit is a hard failure (an emit missing a pooling/input must never
+    // pass by being silently skipped).
     let mut min_cosine = 1.0f32;
     let mut worst_label = String::new();
     let mut n = 0usize;
@@ -552,11 +683,178 @@ fn mode_compare() {
     );
     std::fs::write(&result, json).unwrap_or_else(|e| fail(&format!("write {result}: {e}")));
     println!(
-        "[correctness] compare {a_path} vs {b_path}: {n} pairs, min_cosine={min_cosine:.5} \
-(worst {worst_label:?}) threshold={threshold} -> passed={passed}"
+        "[correctness] compare {a_path} vs {b_path}: {n} pairs (reference covers {} inputs x \
+[{}]), min_cosine={min_cosine:.5} (worst {worst_label:?}) threshold={threshold} -> \
+passed={passed}",
+        inputs.len(),
+        ref_poolings.join(",")
     );
     if !passed {
         exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIXTURE: &str = "# comment\n\
+q1\tquery\tgeneral\tHello world\n\
+\n\
+   # indented comment\n\
+d1\tdocument\tgeneral\tA document\twith a tab in its text\n\
+para1_a\tdocument\tpara1\tSame\n\
+para1_b\tdocument\tpara1\tSame, reworded\n";
+
+    fn inputs() -> Vec<Input> {
+        parse_inputs(FIXTURE).expect("fixture parses")
+    }
+
+    fn labels(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_inputs_skips_comments_and_blank_lines_and_keeps_tabs_in_text() {
+        let rows = inputs();
+        let ids: Vec<&str> = rows.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["q1", "d1", "para1_a", "para1_b"]);
+        assert_eq!(rows[1].text, "A document\twith a tab in its text");
+        assert_eq!(rows[0].role, "query");
+        assert_eq!(rows[2].group, "para1");
+    }
+
+    #[test]
+    fn parse_inputs_rejects_malformed_empty_duplicate_and_pipe_ids() {
+        assert!(parse_inputs("q1\tquery\tgeneral\n")
+            .unwrap_err()
+            .contains("malformed"));
+        assert!(parse_inputs("# only comments\n\n")
+            .unwrap_err()
+            .contains("no rows"));
+        let dup = "q1\tquery\tg\tA\nq1\tdocument\tg\tB\n";
+        assert!(parse_inputs(dup)
+            .unwrap_err()
+            .contains("duplicate input id \"q1\""));
+        let pipe = "q|1\tquery\tg\tA\n";
+        assert!(parse_inputs(pipe)
+            .unwrap_err()
+            .contains("must not contain '|'"));
+    }
+
+    #[test]
+    fn ref_poolings_must_be_known_and_non_empty() {
+        assert_eq!(parse_ref_poolings("last").unwrap(), ["last"]);
+        assert_eq!(
+            parse_ref_poolings(" mean , last ,mean").unwrap(),
+            ["mean", "last"]
+        );
+        assert!(parse_ref_poolings("lsat")
+            .unwrap_err()
+            .contains("unknown pooling \"lsat\""));
+        assert!(parse_ref_poolings("").unwrap_err().contains("no poolings"));
+        assert!(parse_ref_poolings(" , ")
+            .unwrap_err()
+            .contains("no poolings"));
+    }
+
+    #[test]
+    fn coverage_passes_when_reference_equals_inputs_x_poolings() {
+        let golden = labels(&["q1|last", "d1|last", "para1_a|last", "para1_b|last"]);
+        check_reference_coverage(&inputs(), &["last"], &golden).unwrap();
+        // Order does not matter.
+        let shuffled = labels(&["para1_b|last", "d1|last", "para1_a|last", "q1|last"]);
+        check_reference_coverage(&inputs(), &["last"], &shuffled).unwrap();
+        // A generic emit covers every pooling.
+        let generic = labels(&[
+            "q1|mean",
+            "q1|last",
+            "d1|mean",
+            "d1|last",
+            "para1_a|mean",
+            "para1_a|last",
+            "para1_b|mean",
+            "para1_b|last",
+        ]);
+        check_reference_coverage(&inputs(), &["mean", "last"], &generic).unwrap();
+    }
+
+    // The gap behind issue #7: an inputs.tsv row with no golden row must fail, naming it.
+    #[test]
+    fn coverage_fails_closed_when_an_input_has_no_reference_label() {
+        let stale_golden = labels(&["q1|last", "d1|last", "para1_a|last"]);
+        let err = check_reference_coverage(&inputs(), &["last"], &stale_golden).unwrap_err();
+        assert!(
+            err.contains("1 expected label(s) absent from the reference: para1_b|last"),
+            "{err}"
+        );
+        assert!(!err.contains("no input produces"), "{err}");
+    }
+
+    // A removed or renamed row leaves a stale golden label: still fails, naming it.
+    #[test]
+    fn coverage_fails_closed_when_the_reference_has_a_label_no_input_produces() {
+        let stale_golden = labels(&[
+            "q1|last",
+            "d1|last",
+            "para1_a|last",
+            "para1_b|last",
+            "d_removed|last",
+        ]);
+        let err = check_reference_coverage(&inputs(), &["last"], &stale_golden).unwrap_err();
+        assert!(
+            err.contains("1 reference label(s) that no input produces: d_removed|last"),
+            "{err}"
+        );
+        // A rename shows up on both sides at once.
+        let renamed = labels(&["q1|last", "d1|last", "para1_a|last", "para1_c|last"]);
+        let err = check_reference_coverage(&inputs(), &["last"], &renamed).unwrap_err();
+        assert!(
+            err.contains("absent from the reference: para1_b|last"),
+            "{err}"
+        );
+        assert!(err.contains("no input produces: para1_c|last"), "{err}");
+    }
+
+    #[test]
+    fn coverage_fails_closed_on_wrong_pooling_duplicates_and_empty_reference() {
+        // A golden that carries a pooling it should not (or the wrong one) is not equal.
+        let mean = labels(&["q1|mean", "d1|mean", "para1_a|mean", "para1_b|mean"]);
+        let err = check_reference_coverage(&inputs(), &["last"], &mean).unwrap_err();
+        assert!(err.contains("4 expected label(s) absent"), "{err}");
+        assert!(
+            err.contains("4 reference label(s) that no input produces"),
+            "{err}"
+        );
+        let dup = labels(&[
+            "q1|last",
+            "d1|last",
+            "para1_a|last",
+            "para1_b|last",
+            "q1|last",
+        ]);
+        let err = check_reference_coverage(&inputs(), &["last"], &dup).unwrap_err();
+        assert!(
+            err.contains("1 duplicate reference label(s): q1|last"),
+            "{err}"
+        );
+        let err = check_reference_coverage(&inputs(), &["last"], &[]).unwrap_err();
+        assert!(err.contains("4 expected label(s) absent"), "{err}");
+    }
+
+    // The committed fixture pair must pass the gate unchanged: every inputs.tsv row has
+    // exactly one `<id>|last` golden row and nothing else.
+    #[test]
+    fn committed_inputs_and_golden_fixtures_agree() {
+        let fix = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let inputs = load_inputs_at(fix.join("inputs.tsv").to_str().unwrap());
+        let golden = read_emit(fix.join("golden.tsv").to_str().unwrap());
+        let golden_labels: Vec<String> = golden.iter().map(|(l, _)| l.clone()).collect();
+        check_reference_coverage(&inputs, &["last"], &golden_labels).unwrap();
+        assert_eq!(golden.len(), inputs.len());
+        for (_, v) in &golden {
+            assert_eq!(v.len(), 768);
+        }
     }
 }
 
