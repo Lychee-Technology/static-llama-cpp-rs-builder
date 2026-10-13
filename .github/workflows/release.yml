@@ -35,6 +35,8 @@ name: build-static-llama-cpp
 on:
   push:
     tags: ["v*"]
+  # PRs run the full native matrix on GitHub-hosted runners; only a tag push publishes.
+  pull_request:
   workflow_dispatch:
     inputs:
       pgo:
@@ -179,6 +181,7 @@ jobs:
               bash scripts/verify-provenance.sh dist/build-info.json
               SMOKE_RESULT="$RESULTS/smoke.json" \
                 cargo run --release --manifest-path smoke/Cargo.toml
+              bash scripts/embeddinggemma-smoke.sh
               # Numerical-correctness gate: tuned-vs-generic + golden parity + self-
               # consistency, on the reference model and the deployed SMOKE_MODEL.
               bash scripts/correctness.sh
@@ -302,9 +305,10 @@ jobs:
   # should ALSO run on a real Graviton2 / Neoverse-N1 host. There is no self-hosted N1
   # runner yet; enable this by setting the repo variable ENABLE_N1_CORRECTNESS=1 once a
   # `[self-hosted, linux, ARM64, graviton2]` runner is registered. It is a separate job,
-  # so it never blocks the release job.
+  # so it never blocks the release job. It never runs for pull_request events: PR code
+  # (possibly from a fork) must not be scheduled onto the self-hosted runner by this file.
   correctness-n1:
-    if: ${{ vars.ENABLE_N1_CORRECTNESS == '1' }}
+    if: ${{ vars.ENABLE_N1_CORRECTNESS == '1' && github.event_name != 'pull_request' }}
     runs-on: [self-hosted, linux, ARM64, graviton2]   # real Graviton2 (Neoverse N1)
     steps:
       - uses: actions/checkout@v7

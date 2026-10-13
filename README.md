@@ -36,9 +36,9 @@ Single source of truth: [`scripts/config.env`](scripts/config.env).
 
 | Input | Pin |
 |---|---|
-| llama.cpp (compiled engine) | tag `v0.6.0` @ `d81235049384534c167caea52b85a694f6103d14` (HEAD, tag peel and `describe --exact-match` verified at build time) |
+| llama.cpp (compiled engine) | nightly tag `b11577` @ `cbe28bb3cb0758f0c566a9a3561766821aeb0748` (HEAD, lightweight tag type/peel and `describe --exact-match` verified; compiled semantic version `0.6.0[-dev]`) |
 | llama-cpp-rs (`llama-cpp-sys-2` build driver) | tag `0.1.159` @ `3cfdd729d65e35da407e5f820edf73201bfa54f6` (crate `0.1.159`). Its vendored llama.cpp `26394b4e` is replaced by the tag above. |
-| Artifact contract | `4` ([CONTRACT.md](CONTRACT.md)) |
+| Artifact contract | `5` ([CONTRACT.md](CONTRACT.md)) |
 | Rust | `1.96.1` (`rust-toolchain.toml`) |
 | CMake | `3.29.6` (`Dockerfile`) |
 | Compiler | Clang 18 (AL2023 `clang18`), GNU libstdc++ |
@@ -60,7 +60,7 @@ build image. CI gates the environment envelope (`EXPECTED_CLANG_MAJOR`, `MIN_GLI
    1. Selects the target profile from the **native** host architecture (`scripts/config.env`).
       It refuses anything that is not a native build (see below). On x86-64 it also runs
       the fail-closed x86-64-v3 CPU gate.
-   2. Clones the pinned llama-cpp-rs commit and checks out llama.cpp `v0.6.0` in place of
+   2. Clones the pinned llama-cpp-rs commit and checks out llama.cpp `b11577` in place of
       the crate's submodule, verifying both by commit.
    3. Builds `llama-cpp-sys-2` with the profile's fixed flags injected:
       - ARM64: ggml `GGML_CPU_ARM_ARCH` for dotprod, plus `-mtune`.
@@ -78,6 +78,10 @@ build image. CI gates the environment envelope (`EXPECTED_CLANG_MAJOR`, `MIN_GLI
    5. Harvests the `.a` files, bindings and headers into `dist/`, and writes
       `build-info.json`.
 2. **smoke** (`smoke/`): links the archives and runs a real embedding/context-init test.
+   `scripts/embeddinggemma-smoke.sh` additionally tests the fixed ggml-org
+   EmbeddingGemma 2 Q8_0 text GGUF: mean pooling, non-causal attention, hidden width
+   512 and projected output width 768, with the actual input SHA-256 recorded.
+   This is liveness/shape validation, not independent FP32 parity or multimodal support.
 3. `scripts/correctness.sh` compares the tuned build against a generic reference build of
    the same revision, and also runs golden parity and self-consistency checks. Every
    comparison first requires the reference's label set to equal the rows of
@@ -91,9 +95,11 @@ build image. CI gates the environment envelope (`EXPECTED_CLANG_MAJOR`, `MIN_GLI
    supported.
 4. `scripts/bench.sh` (`bench/`) compares prebuilt vs from-source performance and enforces
    a regression threshold.
-5. `scripts/package.sh` merges the results, gathers licenses and writes `SHA256SUMS`.
+5. `scripts/package.sh` requires and merges all four results (legacy smoke,
+   EmbeddingGemma text smoke, benchmark, correctness), gathers licenses and writes `SHA256SUMS`.
 
-CI (`.github/workflows/release.yml`) runs all of this once per variant. Each variant runs on
+CI (`.github/workflows/release.yml`) runs all of this once per variant on pull requests,
+tag pushes and manual dispatch. Pull requests do not publish a release. Each variant runs on
 a GitHub-hosted runner **of its own architecture**, inside a resolved-and-recorded AL2023
 container of that architecture:
 - `aarch64-graviton2` on `ubuntu-24.04-arm` (Neoverse N2);
@@ -137,11 +143,23 @@ docker run --rm -v "$PWD:/work" -w /work \
     export SMOKE_MODEL="$(smoke/fixtures/fetch-model.sh)"
     export RESULTS=/work/.build/results; mkdir -p "$RESULTS"
     SMOKE_RESULT="$RESULTS/smoke.json" cargo run --release --manifest-path smoke/Cargo.toml
+    bash scripts/embeddinggemma-smoke.sh
     scripts/correctness.sh && scripts/bench.sh && scripts/package.sh'
 ```
 
 Before the first release, pin the smoke/bench model: set the `SMOKE_MODEL_URL` /
 `SMOKE_MODEL_SHA256` repo variables (see `smoke/fixtures/fetch-model.sh`).
+
+The additional EmbeddingGemma fixture is pinned in `scripts/config.env`, not those
+variables. It downloads about 310 MB into `.build/models/` and is not shipped in
+the native artifact. Existing Jina numerical fixtures are retained strictly as
+legacy runtime-regression coverage; this upgrade does not select LTEmbed's default
+model or replace its independent correctness data. LTEmbed's model migration must
+separately verify prompts, tokenizer parity, pooling, the learned projection and
+independent FP32 embeddings before updating its release inputs.
+
+Offline input/gate tests: `bash scripts/test-source-pins.sh`. They use scratch Git
+repositories and synthetic metadata, not real build or model-correctness validation.
 
 ### Optional: PGO-optimized build
 

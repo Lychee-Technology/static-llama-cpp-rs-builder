@@ -105,6 +105,47 @@ assert_no_build_env_overrides() {
 }
 
 # --- Pinned sources -----------------------------------------------------------------
+
+# Called by preparation and offline regression tests. A nightly lightweight tag is
+# allowed only when config.env pins that exact object type and resolved commit.
+verify_llama_cpp_source() {
+  local tagc tag_name dirty
+  case "${EXPECTED_LLAMA_CPP_TAG_TYPE}" in
+    tag|commit) ;;
+    *) _lib_die "unsupported pinned llama.cpp tag type '${EXPECTED_LLAMA_CPP_TAG_TYPE}'" ;;
+  esac
+  LLAMA_CPP_COMMIT="$(git -C "${LLAMA_CPP_DIR}" rev-parse HEAD)"
+  [[ "${LLAMA_CPP_COMMIT}" == "${EXPECTED_LLAMA_CPP_COMMIT}" ]] \
+    || _lib_die "llama.cpp HEAD ${LLAMA_CPP_COMMIT} != expected ${EXPECTED_LLAMA_CPP_COMMIT}"
+  tagc="$(git -C "${LLAMA_CPP_DIR}" rev-parse -q --verify "refs/tags/${LLAMA_CPP_TAG}^{commit}" || true)"
+  [[ "${tagc}" == "${EXPECTED_LLAMA_CPP_COMMIT}" ]] \
+    || _lib_die "llama.cpp tag ${LLAMA_CPP_TAG} -> '${tagc:-<missing>}', expected ${EXPECTED_LLAMA_CPP_COMMIT}"
+  LLAMA_CPP_TAG_TYPE="$(git -C "${LLAMA_CPP_DIR}" cat-file -t "refs/tags/${LLAMA_CPP_TAG}")"
+  [[ "${LLAMA_CPP_TAG_TYPE}" == "${EXPECTED_LLAMA_CPP_TAG_TYPE}" ]] \
+    || _lib_die "llama.cpp ${LLAMA_CPP_TAG} is a ${LLAMA_CPP_TAG_TYPE}, expected ${EXPECTED_LLAMA_CPP_TAG_TYPE}"
+  if [[ "${LLAMA_CPP_TAG_TYPE}" == "tag" ]]; then
+    tag_name="$(git -C "${LLAMA_CPP_DIR}" cat-file tag "refs/tags/${LLAMA_CPP_TAG}" | sed -n 's/^tag //p')"
+    [[ "${tag_name}" == "${LLAMA_CPP_TAG}" ]] \
+      || _lib_die "llama.cpp tag object names '${tag_name}', expected ${LLAMA_CPP_TAG}"
+  fi
+  LLAMA_CPP_DESCRIBE="$(git -C "${LLAMA_CPP_DIR}" describe --tags --exact-match HEAD 2>/dev/null || true)"
+  [[ "${LLAMA_CPP_DESCRIBE}" == "${LLAMA_CPP_TAG}" ]] \
+    || _lib_die "llama.cpp 'git describe --tags --exact-match' = '${LLAMA_CPP_DESCRIBE}', expected ${LLAMA_CPP_TAG}"
+  dirty="$(git -C "${LLAMA_CPP_DIR}" status --porcelain --untracked-files=no)"
+  [[ -z "${dirty}" ]] || _lib_die "llama.cpp checkout has local modifications: ${dirty}"
+  LLAMA_CPP_DATE="$(git -C "${LLAMA_CPP_DIR}" show -s --format=%cI HEAD)"
+}
+
+verify_llama_cpp_embedded_version() {
+  local header="$1"
+  [[ -f "${header}" ]] || _lib_die "llama-version.h not found at ${header}"
+  EMB_VERSION="$(sed -n 's/^#define LLAMA_VERSION *"\(.*\)"$/\1/p' "${header}")"
+  EMB_COMMIT="$(sed -n 's/^#define LLAMA_COMMIT *"\(.*\)"$/\1/p' "${header}")"
+  [[ "${#EMB_COMMIT}" -ge 7 && "${EXPECTED_LLAMA_CPP_COMMIT}" == "${EMB_COMMIT}"* ]] \
+    || _lib_die "compiled llama.cpp commit '${EMB_COMMIT}' is not a prefix of ${EXPECTED_LLAMA_CPP_COMMIT}"
+  [[ "${EMB_VERSION}" == "${EXPECTED_LLAMA_CPP_VERSION}" || "${EMB_VERSION}" == "${EXPECTED_LLAMA_CPP_VERSION}-dev" ]] \
+    || _lib_die "compiled llama.cpp version '${EMB_VERSION}' != ${EXPECTED_LLAMA_CPP_VERSION}[-dev]"
+}
 # Prepare ${1} as the pinned llama-cpp-rs checkout with llama.cpp ${LLAMA_CPP_TAG}
 # substituted for the crate's vendored submodule (strategy: no llama-cpp-rs release
 # vendors ${LLAMA_CPP_TAG}; see config.env). Everything is verified by commit, never by a
@@ -114,7 +155,7 @@ assert_no_build_env_overrides() {
 # Reuses an existing checkout only if it is exactly the pin; build.rs is always restored
 # to pristine, so callers patch (or deliberately don't) from a known state.
 prepare_crate_source() {
-  local dest="$1" head tagc ver dirty tag_name
+  local dest="$1" head tagc ver dirty
   local git=(git -c advice.detachedHead=false)
 
   if [[ -d "${dest}/.git" ]]; then
@@ -160,26 +201,9 @@ prepare_crate_source() {
   fi
 
   # (3) verify what will actually be compiled — HEAD, tag peel, tag object, exact describe.
-  LLAMA_CPP_COMMIT="$(git -C "${LLAMA_CPP_DIR}" rev-parse HEAD)"
-  [[ "${LLAMA_CPP_COMMIT}" == "${EXPECTED_LLAMA_CPP_COMMIT}" ]] \
-    || _lib_die "llama.cpp HEAD ${LLAMA_CPP_COMMIT} != expected ${EXPECTED_LLAMA_CPP_COMMIT}"
-  tagc="$(git -C "${LLAMA_CPP_DIR}" rev-parse -q --verify "refs/tags/${LLAMA_CPP_TAG}^{commit}" || true)"
-  [[ "${tagc}" == "${EXPECTED_LLAMA_CPP_COMMIT}" ]] \
-    || _lib_die "llama.cpp tag ${LLAMA_CPP_TAG} -> '${tagc:-<missing>}', expected ${EXPECTED_LLAMA_CPP_COMMIT}"
-  LLAMA_CPP_TAG_TYPE="$(git -C "${LLAMA_CPP_DIR}" cat-file -t "refs/tags/${LLAMA_CPP_TAG}")"
-  [[ "${LLAMA_CPP_TAG_TYPE}" == "tag" ]] \
-    || _lib_die "llama.cpp ${LLAMA_CPP_TAG} is a ${LLAMA_CPP_TAG_TYPE}, expected an annotated tag"
-  tag_name="$(git -C "${LLAMA_CPP_DIR}" cat-file tag "refs/tags/${LLAMA_CPP_TAG}" | sed -n 's/^tag //p')"
-  [[ "${tag_name}" == "${LLAMA_CPP_TAG}" ]] \
-    || _lib_die "llama.cpp tag object names '${tag_name}', expected ${LLAMA_CPP_TAG}"
-  LLAMA_CPP_DESCRIBE="$(git -C "${LLAMA_CPP_DIR}" describe --tags --exact-match HEAD 2>/dev/null || true)"
-  [[ "${LLAMA_CPP_DESCRIBE}" == "${LLAMA_CPP_TAG}" ]] \
-    || _lib_die "llama.cpp 'git describe --tags --exact-match' = '${LLAMA_CPP_DESCRIBE}', expected ${LLAMA_CPP_TAG}"
-  dirty="$(git -C "${LLAMA_CPP_DIR}" status --porcelain --untracked-files=no)"
-  [[ -z "${dirty}" ]] || _lib_die "llama.cpp checkout has local modifications: ${dirty}"
-  LLAMA_CPP_DATE="$(git -C "${LLAMA_CPP_DIR}" show -s --format=%cI HEAD)"
+  verify_llama_cpp_source
   _lib_log "llama-cpp-rs ${CRATE_REF} @ ${CRATE_COMMIT} (llama-cpp-sys-2 ${CRATE_VERSION}; vendored ${CRATE_GITLINK:0:12} overridden)"
-  _lib_log "llama.cpp ${LLAMA_CPP_DESCRIBE} @ ${LLAMA_CPP_COMMIT} (annotated tag, ${LLAMA_CPP_DATE})"
+  _lib_log "llama.cpp ${LLAMA_CPP_DESCRIBE} @ ${LLAMA_CPP_COMMIT} (tag object type ${LLAMA_CPP_TAG_TYPE}, ${LLAMA_CPP_DATE})"
 }
 
 # --- N1 ISA injection -----------------------------------------------------------------

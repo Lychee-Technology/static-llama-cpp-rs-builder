@@ -45,6 +45,12 @@ The same model is the benchmark workload and, for a PGO build, the training mode
 pinned in `correctness/fixtures/reference-model.env`; changing either pin without the
 other fails the release at that check.
 
+Contract v5 also requires the separate text-only EmbeddingGemma 2 liveness fixture
+from `../scripts/config.env`, run by `../scripts/embeddinggemma-smoke.sh`. It does
+not replace the legacy model or its independent golden. `../CONTRACT.md` describes
+the additional result and its limited coverage. Read pooled buffers using
+`llama_model_n_embd_out`, not the hidden `llama_model_n_embd` width.
+
 ## Output behavior
 
 The release pipeline consumes the process exit status and the machine-readable result

@@ -269,7 +269,9 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
 struct Engine {
     model: *mut llama::llama_model,
     vocab: *const llama::llama_vocab,
-    n_embd: usize,
+    // Pooled-output width (llama_model_n_embd_out), which a projected model makes
+    // differ from the hidden width llama_model_n_embd.
+    n_embd_out: usize,
 }
 
 impl Engine {
@@ -283,14 +285,14 @@ impl Engine {
             ));
         }
         let vocab = llama::llama_model_get_vocab(model);
-        let n_embd = llama::llama_model_n_embd(model);
-        if n_embd <= 0 {
-            fail("model reports n_embd <= 0");
+        let n_embd_out = llama::llama_model_n_embd_out(model);
+        if n_embd_out <= 0 {
+            fail("model reports n_embd_out <= 0");
         }
         Engine {
             model,
             vocab,
-            n_embd: n_embd as usize,
+            n_embd_out: n_embd_out as usize,
         }
     }
 
@@ -383,7 +385,7 @@ impl Engine {
                 "llama_get_embeddings_seq returned null (seq {seq})"
             ));
         }
-        let slice = std::slice::from_raw_parts(emb, self.n_embd);
+        let slice = std::slice::from_raw_parts(emb, self.n_embd_out);
         if !slice.iter().all(|v| v.is_finite()) {
             fail(&format!(
                 "embedding for seq {seq} contains non-finite values"
