@@ -21,8 +21,10 @@ name: build-static-llama-cpp
 #
 # All pins (llama.cpp tag + commit, llama-cpp-rs ref + commit, contract version, target
 # profiles) come from scripts/config.env; build.sh verifies them by commit and
-# verify-provenance.sh re-checks the recorded build-info.json before anything is uploaded.
-# No build caches are used.
+# verify-provenance.sh re-checks the recorded build-info.json before anything is uploaded:
+# --raw (pins only) right after build.sh, then --packaged (pins plus passing smoke,
+# EmbeddingGemma smoke, benchmark and correctness results) after package.sh and again in
+# the release job before publishing. No build caches are used.
 #
 # Optional PGO (profile-guided optimization): enable via the `pgo` workflow_dispatch input,
 # or the RELEASE_PGO repo variable ("1") for tag-triggered releases. Each variant trains its
@@ -178,7 +180,8 @@ jobs:
               export SMOKE_MODEL="$(bash smoke/fixtures/fetch-model.sh)"
               export RESULTS=/work/.build/results; mkdir -p "$RESULTS"
               bash scripts/build.sh
-              bash scripts/verify-provenance.sh dist/build-info.json
+              # Raw build.sh metadata: no results yet (package.sh merges them).
+              bash scripts/verify-provenance.sh --raw dist/build-info.json
               SMOKE_RESULT="$RESULTS/smoke.json" \
                 cargo run --release --manifest-path smoke/Cargo.toml
               bash scripts/embeddinggemma-smoke.sh
@@ -195,9 +198,10 @@ jobs:
       # Fail-closed: the build-info.json about to be uploaded/published must record exactly
       # the pinned llama.cpp tag + commit, llama-cpp-rs ref + commit, llama-cpp-sys-2
       # version, contract version and THIS matrix profile (arch, triple, CPU baseline,
-      # flags) from scripts/config.env, and a native build.
+      # flags) from scripts/config.env, and a native build. Packaged mode also requires
+      # passing smoke, embeddinggemma_smoke, benchmark and correctness results.
       - name: Verify provenance (build-info.json vs scripts/config.env)
-        run: bash scripts/verify-provenance.sh dist/build-info.json "${{ matrix.profile }}"
+        run: bash scripts/verify-provenance.sh --packaged dist/build-info.json "${{ matrix.profile }}"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7
@@ -263,9 +267,9 @@ jobs:
             [[ -f "${tarball}" ]] || { echo "::error::missing ${tarball}" >&2; exit 1; }
             sha256sum -c "${tarball}.sha256"
             # The loose build-info must be the one inside the tarball, and must verify
-            # against THIS variant's profile.
+            # against THIS variant's profile, with all four release results passing.
             tar xzf "${tarball}" -O ./build-info.json | cmp - "build-info-${ARTIFACT_VARIANT}.json"
-            bash ../scripts/verify-provenance.sh "build-info-${ARTIFACT_VARIANT}.json" "${profile}"
+            bash ../scripts/verify-provenance.sh --packaged "build-info-${ARTIFACT_VARIANT}.json" "${profile}"
             expected+=("${tarball}" "${tarball}.sha256" "build-info-${ARTIFACT_VARIANT}.json" "SHA256SUMS-${ARTIFACT_VARIANT}")
           done
           # Nothing else (no v2 / generic / stray asset) may be published.
@@ -358,7 +362,7 @@ jobs:
               export SMOKE_MODEL="$(bash smoke/fixtures/fetch-model.sh)"
               export RESULTS=/work/.build/results; mkdir -p "$RESULTS"
               bash scripts/build.sh
-              bash scripts/verify-provenance.sh dist/build-info.json aarch64-graviton2
+              bash scripts/verify-provenance.sh --raw dist/build-info.json aarch64-graviton2
               bash scripts/correctness.sh
               jq . "$RESULTS/correctness.json"
             '

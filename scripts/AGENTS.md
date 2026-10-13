@@ -14,12 +14,11 @@ Important relationships:
 config.env
    |
    +--> lib.sh  (sourced after config.env)
-   |      +--> build.sh
-   |      +--> correctness.sh
-   |      +--> bench.sh
-   |
-   +--> package.sh
-   +--> verify-provenance.sh
+          +--> build.sh
+          +--> correctness.sh
+          +--> bench.sh
+          +--> package.sh            (assert_release_results)
+          +--> verify-provenance.sh  (assert_release_results)
 
 check-x86-64-v3.sh  (compiles and runs x86-64-v3-probe.c)
    |
@@ -139,12 +138,23 @@ for it here as well.
 Compare metadata against canonical configuration rather than trusting a value simply
 because the build generated it.
 
+It has two modes. `--packaged`, the default, also requires the four release results
+(`smoke`, `embeddinggemma_smoke`, `benchmark`, `correctness`) to be present and passing.
+Use it on anything `package.sh` produced. `--raw` is only for fresh `build.sh` output,
+which has no results yet. Do not use `--raw` after packaging, and do not make it the
+default.
+
 ## `package.sh`
 
 Packaging must fail when required validation results are missing or unsuccessful.
 
 `ALLOW_MISSING_RESULTS=1` bypasses that gate for local development packaging only. Never
 set it in CI or on a release path, and do not add further bypasses.
+
+The gate is `lib.sh` `assert_release_results`, which `verify-provenance.sh --packaged`
+repeats after packaging and in the release job. It is the one definition of the required
+results. Change it there, not in either caller, and keep the
+`scripts/test-source-pins.sh` cases in step.
 
 Do not turn an incomplete build into a releasable artifact.
 

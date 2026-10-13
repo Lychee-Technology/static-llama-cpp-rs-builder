@@ -190,9 +190,13 @@ LICENSES/       llama.cpp (covers ggml) and builder licenses (all MIT)
    Also assert `jq -r .artifact_contract_version extracted/build-info.json` equals the
    version LTEmbed supports, and (recommended) `jq -r .llama_cpp.commit` equals the engine
    commit you validated against. Also check `jq -r .target_profile` is the variant you expect
-   (`aarch64-graviton2` / `x86_64-v3`). `scripts/verify-provenance.sh <build-info.json>
-   <profile>` (bash + jq) checks every pin in `build-info.json` against this repo's
-   `scripts/config.env`.
+   (`aarch64-graviton2` / `x86_64-v3`). `scripts/verify-provenance.sh --packaged
+   <build-info.json> <profile>` (bash + jq) checks every pin in `build-info.json` against
+   this repo's `scripts/config.env`. It also requires the four release results (`smoke`,
+   `embeddinggemma_smoke`, `benchmark`, `correctness`) to be present with `passed == true`,
+   and `embeddinggemma_smoke` to match its pins. A downloaded release is always packaged, and
+   `--packaged` is the default. `--raw` is for fresh `build.sh` output, before any results
+   exist, and is not a release check.
 3. **Link.** Copy `consume.build.rs` to your crate's `build.rs` and set
    `STATIC_LLAMA_DIR=/abs/path/to/extracted`. It emits the search path, the static libs in
    dependency order, and the C++/OS deps. Equivalent link line (also in `build-info.json`,
@@ -223,9 +227,10 @@ buffer read would only check 512 elements and is no longer used.
 Packaging requires `RESULTS/embeddinggemma-smoke.json` with a passing result,
 matching model identity/hash and dimensions. It is merged into
 `build-info.json.embeddinggemma_smoke`, alongside (not replacing) the original
-`smoke`, `benchmark` and `correctness` records. Provenance verification checks the
-new result once present, against the canonical pins. Both native CI variants run
-the new test before packaging; pull requests run the matrix without publishing.
+`smoke`, `benchmark` and `correctness` records. `scripts/verify-provenance.sh
+--packaged` requires it, with the same pins, after packaging and again before
+publication. Both native CI variants run the new test before packaging; pull
+requests run the matrix without publishing.
 
 This fixture is **text-only liveness and shape coverage**. It does not run the
 vision/audio projectors, validate prompt/tokenizer parity, prove FP32 embedding
@@ -318,9 +323,12 @@ runner is provisioned.
 | `runner` | Where the build ran: `kind` (`github-hosted` / `self-hosted` / `local`), `label`, `uarch`, `cpu_model`. |
 | `smoke` / `embeddinggemma_smoke` | The two smoke results: `passed`, `n_embd` (hidden width), `n_embd_out` (pooled output width: the number of elements read and checked), `n_tokens`, `l2_norm` and `model_sha256` (computed from the file tested). `embeddinggemma_smoke` also records `model_id`, and must match the `EMBEDDINGGEMMA_*` pins. The legacy `smoke` model is identified by its hash alone; `correctness.sh` requires it to equal the correctness reference GGUF. |
 
-Release CI runs `scripts/verify-provenance.sh <file> <profile>` on each variant's
-`build-info.json` before it publishes, and fails on any mismatch with `scripts/config.env`.
-On x86-64 that includes the v3 gate result, `effective_isa` and `disassembly.above_v3 == 0`.
+Release CI runs `scripts/verify-provenance.sh --packaged <file> <profile>` on each variant's
+`build-info.json` after packaging, and again in the release job before it publishes. It
+fails on any mismatch with `scripts/config.env`. On x86-64 that includes the v3 gate
+result, `effective_isa` and `disassembly.above_v3 == 0`. It also fails when `smoke`,
+`embeddinggemma_smoke`, `benchmark` or `correctness` is missing or has `passed != true`,
+which is the same check `scripts/package.sh` gates on.
 
 ## Guarantees & non-guarantees
 
@@ -331,6 +339,8 @@ On x86-64 that includes the v3 gate result, `effective_isa` and `disassembly.abo
   text fixture; see `build-info.json.smoke` / `.embeddinggemma_smoke`), were within the
   benchmark regression threshold vs a from-source build (see `build-info.json.benchmark`),
   and passed the correctness gate above (`build-info.json.correctness.passed == true`).
+  `scripts/package.sh` refuses to package without these results, and release CI re-checks
+  them in the published `build-info.json` (`scripts/verify-provenance.sh --packaged`).
 - **Not guaranteed:** ABI stability across contract versions, correctness on a
   microarchitecture other than the one the gate ran on (see §5), that a different glibc/
   compiler baseline links cleanly, or **any** support for x86-64 CPUs below x86-64-v3.

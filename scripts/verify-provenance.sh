@@ -8,13 +8,30 @@
 # gate). Release CI runs this before publishing; it needs only bash + jq, so it can also be
 # pointed at a downloaded release's build-info.json from any machine.
 #
-#   scripts/verify-provenance.sh [path/to/build-info.json [PROFILE]]
+# It then checks the release results (smoke, embeddinggemma_smoke, benchmark, correctness)
+# with the gate package.sh applies (lib.sh assert_release_results):
+#   --packaged (default)  every result must be present and pass. Use it on anything
+#                         package.sh produced, including every downloaded release.
+#   --raw                 for fresh build.sh output, which has no results yet: none is
+#                         required, but one that is present must still pass.
+#
+#   scripts/verify-provenance.sh [--packaged | --raw] [path/to/build-info.json [PROFILE]]
 #     default file: dist/build-info.json; default PROFILE: the one config.env selects for
 #     this host (pass aarch64-graviton2 or x86_64-v3 to check a file from elsewhere).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/config.env"
+source "${ROOT}/scripts/lib.sh"
+LIB_TAG=verify-provenance
+usage="usage: verify-provenance.sh [--packaged | --raw] [path/to/build-info.json [PROFILE]]"
+MODE=packaged
+case "${1:-}" in
+  --packaged) shift ;;
+  --raw) MODE=raw; shift ;;
+  -*) echo "verify-provenance: unknown option '$1'; ${usage}" >&2; exit 2 ;;
+esac
+[[ $# -le 2 ]] || { echo "verify-provenance: too many arguments; ${usage}" >&2; exit 2; }
 BI="${1:-${ROOT}/dist/build-info.json}"
 [[ -f "${BI}" ]] || { echo "verify-provenance: ${BI} not found" >&2; exit 1; }
 if [[ -n "${2:-}" ]]; then set_target_profile "$2"; fi
@@ -27,10 +44,6 @@ jq -e \
   --arg llc_commit "${EXPECTED_LLAMA_CPP_COMMIT}" \
   --arg llc_tag_type "${EXPECTED_LLAMA_CPP_TAG_TYPE}" \
   --arg llc_version "${EXPECTED_LLAMA_CPP_VERSION}" \
-  --arg eg_sha "${EMBEDDINGGEMMA_MODEL_SHA256}" \
-  --arg eg_model "${EMBEDDINGGEMMA_MODEL_ID}" \
-  --argjson eg_hidden "${EMBEDDINGGEMMA_HIDDEN_DIM}" \
-  --argjson eg_output "${EMBEDDINGGEMMA_OUTPUT_DIM}" \
   --arg crate_ref "${CRATE_REF}" \
   --arg crate_commit "${EXPECTED_CRATE_COMMIT}" \
   --arg crate_version "${CRATE_VERSION}" \
@@ -97,16 +110,10 @@ jq -e \
             if .pgo.enabled == true
             then (.pgo.use_flags | type) == "string" and (.pgo.use_flags | startswith("-fprofile-use="))
             else .pgo.use_flags == null end)
-  # Raw build.sh metadata has no results yet. package.sh requires this result;
-  # once present, its model identity and projected dimensions must match the pins.
-  and check("embeddinggemma_smoke";
-            if .embeddinggemma_smoke == null then true
-            else .embeddinggemma_smoke.passed == true
-                 and .embeddinggemma_smoke.model_id == $eg_model
-                 and .embeddinggemma_smoke.model_sha256 == $eg_sha
-                 and .embeddinggemma_smoke.n_embd == $eg_hidden
-                 and .embeddinggemma_smoke.n_embd_out == $eg_output
-            end)
   ' "${BI}" >/dev/null
 
-echo "provenance OK: contract v${ARTIFACT_CONTRACT_VERSION}; llama.cpp ${LLAMA_CPP_TAG} @ ${EXPECTED_LLAMA_CPP_COMMIT}; llama-cpp-rs ${CRATE_REF} @ ${EXPECTED_CRATE_COMMIT} (llama-cpp-sys-2 ${CRATE_VERSION}); native ${TARGET_TRIPLE} (${TARGET_PROFILE}: ${CFLAGS_TUNE})"
+assert_release_results "${MODE}" "${BI}"
+if [[ "${MODE}" == packaged ]]; then results="release results present and passing"
+else results="raw build metadata, release results not required"; fi
+
+echo "provenance OK (${results}): contract v${ARTIFACT_CONTRACT_VERSION}; llama.cpp ${LLAMA_CPP_TAG} @ ${EXPECTED_LLAMA_CPP_COMMIT}; llama-cpp-rs ${CRATE_REF} @ ${EXPECTED_CRATE_COMMIT} (llama-cpp-sys-2 ${CRATE_VERSION}); native ${TARGET_TRIPLE} (${TARGET_PROFILE}: ${CFLAGS_TUNE})"
