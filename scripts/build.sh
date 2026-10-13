@@ -458,7 +458,7 @@ jq -n \
                      vendored_llama_cpp_overridden: ($crate_gitlink != $llc_commit) },
      llama_cpp_sys_2: { version: $crate_version, default_features: false,
                         features: ($features | split(",") | map(select(. != ""))) },
-      # The engine actually compiled: verified HEAD == commit, pinned tag type and peel,
+     # The engine actually compiled: verified HEAD == commit, pinned tag type and peel,
      # `git describe --tags --exact-match` == tag, and the compiled llama-version.h agrees.
      llama_cpp: { repository: $llc_repo, tag: $llc_tag, tag_type: $llc_tag_type,
                   commit: $llc_commit, describe: $llc_describe, date: $llc_date,

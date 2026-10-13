@@ -48,11 +48,11 @@ jq -e \
   def check(name; cond): if cond then true else error("provenance mismatch: \(name)") end;
   check("artifact_contract_version"; (.artifact_contract_version | tostring) == $contract)
   and check("llama_cpp.tag";        .llama_cpp.tag == $llc_tag)
-   and check("llama_cpp.tag_type";   .llama_cpp.tag_type == $llc_tag_type)
+  and check("llama_cpp.tag_type";   .llama_cpp.tag_type == $llc_tag_type)
   and check("llama_cpp.commit";     .llama_cpp.commit == $llc_commit)
-   and check("llama_cpp.describe";   .llama_cpp.describe == $llc_tag)
-   and check("llama_cpp.embedded_version";
-             .llama_cpp.embedded_version == $llc_version or .llama_cpp.embedded_version == ($llc_version + "-dev"))
+  and check("llama_cpp.describe";   .llama_cpp.describe == $llc_tag)
+  and check("llama_cpp.embedded_version";
+            .llama_cpp.embedded_version == $llc_version or .llama_cpp.embedded_version == ($llc_version + "-dev"))
   and (.llama_cpp.embedded_commit as $emb
        | check("llama_cpp.embedded_commit";
                ($emb | type) == "string" and ($emb | length) >= 7
@@ -93,20 +93,20 @@ jq -e \
             if .pgo.enabled == true
             then .pgo.architecture == $arch and .pgo.cpu_baseline == $baseline
             else true end)
-   and check("pgo.use_flags";
+  and check("pgo.use_flags";
             if .pgo.enabled == true
             then (.pgo.use_flags | type) == "string" and (.pgo.use_flags | startswith("-fprofile-use="))
-             else .pgo.use_flags == null end)
-   # Raw build.sh metadata has no results yet. package.sh requires this result;
-   # once present, its model identity and projected dimensions must match the pins.
-   and check("embeddinggemma_smoke";
-             if .embeddinggemma_smoke == null then true
-             else .embeddinggemma_smoke.passed == true
-                  and .embeddinggemma_smoke.model_id == $eg_model
-                  and .embeddinggemma_smoke.model_sha256 == $eg_sha
-                  and .embeddinggemma_smoke.n_embd == $eg_hidden
-                  and .embeddinggemma_smoke.n_embd_out == $eg_output
-             end)
+            else .pgo.use_flags == null end)
+  # Raw build.sh metadata has no results yet. package.sh requires this result;
+  # once present, its model identity and projected dimensions must match the pins.
+  and check("embeddinggemma_smoke";
+            if .embeddinggemma_smoke == null then true
+            else .embeddinggemma_smoke.passed == true
+                 and .embeddinggemma_smoke.model_id == $eg_model
+                 and .embeddinggemma_smoke.model_sha256 == $eg_sha
+                 and .embeddinggemma_smoke.n_embd == $eg_hidden
+                 and .embeddinggemma_smoke.n_embd_out == $eg_output
+            end)
   ' "${BI}" >/dev/null
 
 echo "provenance OK: contract v${ARTIFACT_CONTRACT_VERSION}; llama.cpp ${LLAMA_CPP_TAG} @ ${EXPECTED_LLAMA_CPP_COMMIT}; llama-cpp-rs ${CRATE_REF} @ ${EXPECTED_CRATE_COMMIT} (llama-cpp-sys-2 ${CRATE_VERSION}); native ${TARGET_TRIPLE} (${TARGET_PROFILE}: ${CFLAGS_TUNE})"

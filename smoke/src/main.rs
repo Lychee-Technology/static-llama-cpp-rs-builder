@@ -42,6 +42,41 @@ fn check_dimensions(
     Ok(())
 }
 
+// SMOKE_MODEL_ID labels the model only when a caller pins one (embeddinggemma-smoke.sh
+// passes the config.env pin). The legacy smoke model is identified by its SHA-256 alone,
+// so an unset id is omitted from the result rather than recorded as an empty string.
+fn parse_model_id(value: Result<String, std::env::VarError>) -> Result<Option<String>, String> {
+    match value {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Ok(id)
+            if !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte)) =>
+        {
+            Ok(Some(id))
+        }
+        _ => Err("SMOKE_MODEL_ID, when set, must be non-empty [A-Za-z0-9/._-]".into()),
+    }
+}
+
+// The result is merged verbatim into build-info.json; see CONTRACT.md before changing it.
+fn result_json(
+    n_embd: i32,
+    n_embd_out: i32,
+    n_tokens: i32,
+    l2_norm: f32,
+    model_id: Option<&str>,
+    model_sha256: &str,
+) -> String {
+    let model_id = model_id
+        .map(|id| format!(",\"model_id\":{id:?}"))
+        .unwrap_or_default();
+    format!(
+        "{{\"passed\":true,\"n_embd\":{n_embd},\"n_embd_out\":{n_embd_out},\"n_tokens\":{n_tokens},\"l2_norm\":{l2_norm}{model_id},\"model_sha256\":{model_sha256:?}}}\n"
+    )
+}
+
 fn expected_dimension(name: &str) -> Option<i32> {
     std::env::var(name).ok().map(|value| {
         value
@@ -64,13 +99,7 @@ fn main() {
     let model_path = std::env::var("SMOKE_MODEL")
         .unwrap_or_else(|_| fail("$SMOKE_MODEL not set (path to a tiny GGUF embedding model)"));
     let c_model = CString::new(model_path.clone()).unwrap();
-    let model_id = std::env::var("SMOKE_MODEL_ID").unwrap_or_default();
-    if !model_id
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
-    {
-        fail("SMOKE_MODEL_ID contains invalid characters");
-    }
+    let model_id = parse_model_id(std::env::var("SMOKE_MODEL_ID")).unwrap_or_else(|e| fail(&e));
     let digest = std::process::Command::new("sha256sum")
         .arg(&model_path)
         .output()
@@ -181,9 +210,7 @@ fn main() {
         if let Ok(path) = std::env::var("SMOKE_RESULT") {
             let _ = std::fs::write(
                 &path,
-                format!(
-                    "{{\"passed\":true,\"n_embd\":{n_embd},\"n_embd_out\":{n_embd_out},\"n_tokens\":{n},\"l2_norm\":{norm},\"model_id\":{model_id:?},\"model_sha256\":{model_sha:?}}}\n"
-                ),
+                result_json(n_embd, n_embd_out, n, norm, model_id.as_deref(), model_sha),
             );
         }
 
@@ -195,7 +222,38 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::check_dimensions;
+    use super::{check_dimensions, parse_model_id, result_json};
+    use std::env::VarError;
+
+    const SHA: &str = "2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135";
+
+    #[test]
+    fn unset_model_id_is_omitted_not_empty() {
+        assert_eq!(parse_model_id(Err(VarError::NotPresent)), Ok(None));
+        assert_eq!(
+            result_json(768, 768, 6, 1.5, None, SHA),
+            format!("{{\"passed\":true,\"n_embd\":768,\"n_embd_out\":768,\"n_tokens\":6,\"l2_norm\":1.5,\"model_sha256\":\"{SHA}\"}}\n")
+        );
+    }
+
+    #[test]
+    fn pinned_model_id_is_recorded() {
+        let id = parse_model_id(Ok("google/embeddinggemma-2".into())).unwrap();
+        assert_eq!(id.as_deref(), Some("google/embeddinggemma-2"));
+        assert_eq!(
+            result_json(512, 768, 15, 1.5, id.as_deref(), SHA),
+            format!("{{\"passed\":true,\"n_embd\":512,\"n_embd_out\":768,\"n_tokens\":15,\"l2_norm\":1.5,\"model_id\":\"google/embeddinggemma-2\",\"model_sha256\":\"{SHA}\"}}\n")
+        );
+    }
+
+    #[test]
+    fn rejects_empty_or_unsafe_model_id() {
+        for id in ["", "bad\"id", "has space", "back\\slash"] {
+            assert!(parse_model_id(Ok(id.into())).is_err(), "{id:?}");
+        }
+        let not_unicode = VarError::NotUnicode(std::ffi::OsString::from("x"));
+        assert!(parse_model_id(Err(not_unicode)).is_err());
+    }
 
     #[test]
     fn projected_output_can_differ_from_hidden_width() {

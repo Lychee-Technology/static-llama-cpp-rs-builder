@@ -42,6 +42,11 @@ Treat these as correctness methodology:
 
 Do not weaken or simplify them merely to make a changed build pass.
 
+Read pooled embeddings at the `llama_model_n_embd_out` width, not the hidden
+`llama_model_n_embd` width. They are equal for the current reference model, but a projected
+model (e.g. EmbeddingGemma 2: hidden 512, output 768) would otherwise be compared on a
+truncated vector without any error.
+
 When methodology intentionally changes, explain the numerical reason and validate the new
 behavior through the complete correctness pipeline.
 

@@ -60,7 +60,7 @@ build image. CI gates the environment envelope (`EXPECTED_CLANG_MAJOR`, `MIN_GLI
    1. Selects the target profile from the **native** host architecture (`scripts/config.env`).
       It refuses anything that is not a native build (see below). On x86-64 it also runs
       the fail-closed x86-64-v3 CPU gate.
-    2. Clones the pinned llama-cpp-rs commit and checks out llama.cpp `b11577` in place of
+   2. Clones the pinned llama-cpp-rs commit and checks out llama.cpp `b11577` in place of
       the crate's submodule, verifying both by commit.
    3. Builds `llama-cpp-sys-2` with the profile's fixed flags injected:
       - ARM64: ggml `GGML_CPU_ARM_ARCH` for dotprod, plus `-mtune`.
