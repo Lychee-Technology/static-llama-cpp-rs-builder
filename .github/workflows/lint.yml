@@ -37,3 +37,6 @@ jobs:
         run: |
           set -euo pipefail
           git ls-files -z -- '*.sh' | xargs -0 -n1 bash -n
+
+      - name: Offline source pin and package-gate regressions
+        run: bash scripts/test-source-pins.sh

@@ -223,15 +223,7 @@ fi
 # llama.cpp bakes its version + commit into llama-version.h (-> llama_version()); it must
 # name the pinned commit, independently of the git checks in prepare_crate_source.
 VERSION_H="${OUT_DIR}/build/src/llama-version.h"
-[[ -f "${VERSION_H}" ]] || die "llama-version.h not found at ${VERSION_H}"
-EMB_VERSION="$(sed -n 's/^#define LLAMA_VERSION *"\(.*\)"$/\1/p' "${VERSION_H}")"
-EMB_COMMIT="$(sed -n 's/^#define LLAMA_COMMIT *"\(.*\)"$/\1/p' "${VERSION_H}")"
-[[ "${#EMB_COMMIT}" -ge 7 && "${EXPECTED_LLAMA_CPP_COMMIT}" == "${EMB_COMMIT}"* ]] \
-  || die "GATE: compiled llama.cpp reports commit '${EMB_COMMIT}', expected a prefix of ${EXPECTED_LLAMA_CPP_COMMIT}"
-# LLAMA_BUILD_IS_DEV defaults ON upstream (the crate cannot override it), so the tag's
-# version is reported as "<X.Y.Z>-dev"; accept exactly that or the bare version.
-[[ "${EMB_VERSION}" == "${LLAMA_CPP_TAG#v}" || "${EMB_VERSION}" == "${LLAMA_CPP_TAG#v}-dev" ]] \
-  || die "GATE: compiled llama.cpp reports version '${EMB_VERSION}', expected ${LLAMA_CPP_TAG#v}[-dev]"
+verify_llama_cpp_embedded_version "${VERSION_H}"
 log "GATE PASSED: compiled llama.cpp version ${EMB_VERSION}, commit ${EMB_COMMIT}"
 
 # --- 3c. Flag-verification gate (PER compile command) -----------------------------
@@ -466,7 +458,7 @@ jq -n \
                      vendored_llama_cpp_overridden: ($crate_gitlink != $llc_commit) },
      llama_cpp_sys_2: { version: $crate_version, default_features: false,
                         features: ($features | split(",") | map(select(. != ""))) },
-     # The engine actually compiled: verified HEAD == commit, annotated tag peels to it,
+      # The engine actually compiled: verified HEAD == commit, pinned tag type and peel,
      # `git describe --tags --exact-match` == tag, and the compiled llama-version.h agrees.
      llama_cpp: { repository: $llc_repo, tag: $llc_tag, tag_type: $llc_tag_type,
                   commit: $llc_commit, describe: $llc_describe, date: $llc_date,

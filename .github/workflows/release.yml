@@ -35,6 +35,7 @@ name: build-static-llama-cpp
 on:
   push:
     tags: ["v*"]
+  pull_request:
   workflow_dispatch:
     inputs:
       pgo:
@@ -179,6 +180,7 @@ jobs:
               bash scripts/verify-provenance.sh dist/build-info.json
               SMOKE_RESULT="$RESULTS/smoke.json" \
                 cargo run --release --manifest-path smoke/Cargo.toml
+              bash scripts/embeddinggemma-smoke.sh
               # Numerical-correctness gate: tuned-vs-generic + golden parity + self-
               # consistency, on the reference model and the deployed SMOKE_MODEL.
               bash scripts/correctness.sh

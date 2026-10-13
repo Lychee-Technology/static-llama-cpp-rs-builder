@@ -21,9 +21,11 @@ log() { printf '\033[1;34m[package]\033[0m %s\n' "$*"; }
 
 # --- Merge smoke + benchmark + correctness results --------------------------------
 smoke_json="null"; bench_json="null"; correctness_json="null"
+embeddinggemma_json="null"
 [[ -f "${RESULTS}/smoke.json" ]] && smoke_json="$(cat "${RESULTS}/smoke.json")"
 [[ -f "${RESULTS}/bench.json" ]] && bench_json="$(cat "${RESULTS}/bench.json")"
 [[ -f "${RESULTS}/correctness.json" ]] && correctness_json="$(cat "${RESULTS}/correctness.json")"
+[[ -f "${RESULTS}/embeddinggemma-smoke.json" ]] && embeddinggemma_json="$(cat "${RESULTS}/embeddinggemma-smoke.json")"
 
 # The contract says a release carries PASSING smoke + benchmark + correctness provenance.
 # Enforce it here so we can't ship a release with missing/failed results. Set
@@ -35,11 +37,17 @@ if [[ "${ALLOW_MISSING_RESULTS:-0}" != "1" ]]; then
     || { echo "package: benchmark result missing or not passed (set ALLOW_MISSING_RESULTS=1 for dev)" >&2; exit 1; }
   [[ "$(jq -r '.passed // false' <<<"${correctness_json}")" == "true" ]] \
     || { echo "package: correctness result missing or not passed (set ALLOW_MISSING_RESULTS=1 for dev)" >&2; exit 1; }
+  jq -e --arg sha "${EMBEDDINGGEMMA_MODEL_SHA256}" --arg id "${EMBEDDINGGEMMA_MODEL_ID}" \
+    --argjson hidden "${EMBEDDINGGEMMA_HIDDEN_DIM}" --argjson output "${EMBEDDINGGEMMA_OUTPUT_DIM}" \
+    '.passed == true and .model_id == $id and .model_sha256 == $sha
+     and .n_embd == $hidden and .n_embd_out == $output' <<<"${embeddinggemma_json}" >/dev/null \
+    || { echo "package: pinned EmbeddingGemma 2 smoke result missing, mismatched or not passed" >&2; exit 1; }
 fi
 
 tmp="$(mktemp)"
 jq --argjson smoke "${smoke_json}" --argjson bench "${bench_json}" --argjson correctness "${correctness_json}" \
-   '.smoke = $smoke | .benchmark = $bench | .correctness = $correctness' \
+   --argjson embeddinggemma "${embeddinggemma_json}" \
+   '.smoke = $smoke | .benchmark = $bench | .correctness = $correctness | .embeddinggemma_smoke = $embeddinggemma' \
    "${DIST}/build-info.json" > "${tmp}" && mv "${tmp}" "${DIST}/build-info.json"
 log "Merged smoke/benchmark/correctness results into build-info.json"
 
