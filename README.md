@@ -106,9 +106,12 @@ container of that architecture:
 - `x86_64-v3` on `ubuntu-24.04`. The runner must pass the x86-64-v3 gate, or the job
   fails: CI never lowers the baseline or changes `CPU_MARCH`.
 
-CI checks each `build-info.json` against `scripts/config.env`
-(`scripts/verify-provenance.sh <file> <profile>`). On `v*` tags it publishes one GitHub
-Release with exactly the two variants.
+CI checks each `build-info.json` against `scripts/config.env` with
+`scripts/verify-provenance.sh`. Right after `build.sh` it runs `--raw`, which checks the
+pins only. After `package.sh`, and again in the release job, it runs `--packaged` (the
+default), which also requires all four results to be present and passing. That is the
+check `package.sh` gates on, so a `build-info.json` packaged with `ALLOW_MISSING_RESULTS=1`
+is rejected. On `v*` tags CI publishes one GitHub Release with exactly the two variants.
 
 **Native builds only.** The actual host, container, compiler and artifact architectures must
 all be the same: `aarch64` for the ARM64 variant, `x86_64` for the x86-64 variant. The

@@ -168,7 +168,7 @@ jobs:
 
               echo "::group::PGO build (instrument -> train -> optimize)"
               bash scripts/build.sh
-              bash scripts/verify-provenance.sh dist/build-info.json "${PROFILE}"
+              bash scripts/verify-provenance.sh --raw dist/build-info.json "${PROFILE}"
               echo "::endgroup::"
 
               echo "::group::PGO bench (pgo_gain + both-PGO parity)"

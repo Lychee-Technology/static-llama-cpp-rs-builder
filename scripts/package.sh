@@ -4,13 +4,16 @@
 # results into build-info.json, gather license files, and generate SHA256SUMS over every
 # shipped file. Run AFTER build.sh, both smoke steps, correctness.sh and bench.sh.
 #
-# Required inputs (JSON files written by those steps; ALLOW_MISSING_RESULTS=1 is dev-only):
+# Required inputs (JSON files written by those steps; ALLOW_MISSING_RESULTS=1 is dev-only),
+# merged into build-info.json as .smoke, .embeddinggemma_smoke, .benchmark, .correctness:
 #   RESULTS/smoke.json  RESULTS/embeddinggemma-smoke.json  RESULTS/bench.json
 #   RESULTS/correctness.json
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/config.env"
+source "${ROOT}/scripts/lib.sh"
+LIB_TAG=package
 
 DIST="${DIST:-${ROOT}/dist}"
 RESULTS="${RESULTS:-${ROOT}/.build/results}"
@@ -28,28 +31,22 @@ embeddinggemma_json="null"
 [[ -f "${RESULTS}/correctness.json" ]] && correctness_json="$(cat "${RESULTS}/correctness.json")"
 [[ -f "${RESULTS}/embeddinggemma-smoke.json" ]] && embeddinggemma_json="$(cat "${RESULTS}/embeddinggemma-smoke.json")"
 
-# The contract says a release carries PASSING smoke + EmbeddingGemma smoke + benchmark +
-# correctness provenance. Enforce it here so we can't ship a release with missing/failed
-# results. Set ALLOW_MISSING_RESULTS=1 only for local dev packaging.
-if [[ "${ALLOW_MISSING_RESULTS:-0}" != "1" ]]; then
-  [[ "$(jq -r '.passed // false' <<<"${smoke_json}")" == "true" ]] \
-    || { echo "package: smoke result missing or not passed (set ALLOW_MISSING_RESULTS=1 for dev)" >&2; exit 1; }
-  [[ "$(jq -r '.passed // false' <<<"${bench_json}")" == "true" ]] \
-    || { echo "package: benchmark result missing or not passed (set ALLOW_MISSING_RESULTS=1 for dev)" >&2; exit 1; }
-  [[ "$(jq -r '.passed // false' <<<"${correctness_json}")" == "true" ]] \
-    || { echo "package: correctness result missing or not passed (set ALLOW_MISSING_RESULTS=1 for dev)" >&2; exit 1; }
-  jq -e --arg sha "${EMBEDDINGGEMMA_MODEL_SHA256}" --arg id "${EMBEDDINGGEMMA_MODEL_ID}" \
-    --argjson hidden "${EMBEDDINGGEMMA_HIDDEN_DIM}" --argjson output "${EMBEDDINGGEMMA_OUTPUT_DIM}" \
-    '.passed == true and .model_id == $id and .model_sha256 == $sha
-     and .n_embd == $hidden and .n_embd_out == $output' <<<"${embeddinggemma_json}" >/dev/null \
-    || { echo "package: pinned EmbeddingGemma 2 smoke result missing, mismatched or not passed" >&2; exit 1; }
-fi
-
 tmp="$(mktemp)"
+trap 'rm -f "${tmp}"' EXIT
 jq --argjson smoke "${smoke_json}" --argjson bench "${bench_json}" --argjson correctness "${correctness_json}" \
    --argjson embeddinggemma "${embeddinggemma_json}" \
    '.smoke = $smoke | .benchmark = $bench | .correctness = $correctness | .embeddinggemma_smoke = $embeddinggemma' \
-   "${DIST}/build-info.json" > "${tmp}" && mv "${tmp}" "${DIST}/build-info.json"
+   "${DIST}/build-info.json" > "${tmp}"
+
+# The contract says a release carries PASSING smoke + EmbeddingGemma smoke + benchmark +
+# correctness results. Enforce it on the merged build-info.json, before it replaces the
+# raw one, with the same check verify-provenance.sh repeats after packaging, so we can't
+# ship a release with missing/failed results. ALLOW_MISSING_RESULTS=1 skips the gate here,
+# for local dev packaging only; verify-provenance.sh still rejects such results.
+if [[ "${ALLOW_MISSING_RESULTS:-0}" != "1" ]]; then
+  assert_release_results packaged "${tmp}"
+fi
+mv "${tmp}" "${DIST}/build-info.json"
 log "Merged smoke/embeddinggemma_smoke/benchmark/correctness results into build-info.json"
 
 # --- License files ----------------------------------------------------------------

@@ -1,7 +1,8 @@
 # shellcheck shell=bash
-# Shared, fail-closed helpers for build.sh / bench.sh / correctness.sh.
-# Source AFTER scripts/config.env. Every check prints why it failed and exits non-zero;
-# nothing here downgrades a mismatch to a warning.
+# Shared, fail-closed helpers for build.sh / bench.sh / correctness.sh, and the release
+# results gate shared by package.sh / verify-provenance.sh. Source AFTER scripts/config.env.
+# Every check prints why it failed and exits non-zero; nothing here downgrades a mismatch
+# to a warning.
 
 _lib_die() { printf '\033[1;31m[%s:ERROR]\033[0m %s\n' "${LIB_TAG:-lib}" "$*" >&2; exit 1; }
 _lib_log() { printf '\033[1;34m[%s]\033[0m %s\n' "${LIB_TAG:-lib}" "$*"; }
@@ -403,4 +404,40 @@ x86_disasm_scan() {
       for (c in cnt) { printf "category %s %d\n", c, cnt[c]; bad += cnt[c] }
       exit (bad > 0 || n == 0) ? 1 : 0
     }'
+}
+
+# --- Release results ------------------------------------------------------------------
+# The one definition of the results a release must carry (CONTRACT.md "Guarantees"). The
+# packaging gate (package.sh) and the verifier (verify-provenance.sh, after packaging and in
+# the release job) both call this, so they cannot drift. BUILD_INFO is a build-info.json,
+# into which package.sh merges each result verbatim. A result passes when it is an object
+# with `passed == true` (the boolean); embeddinggemma_smoke must also match the
+# EMBEDDINGGEMMA_* pins. Missing means absent or null (build.sh writes null placeholders).
+#   MODE packaged  every result must be present and pass (any packaged build-info.json);
+#   MODE raw       fresh build.sh metadata has no results yet: none is required, but a
+#                  result that is present must still pass.
+# Dies listing every problem, one `.path: actual, expected ...` entry each.
+assert_release_results() {
+  local mode="$1" build_info="$2" problems
+  [[ "${mode}" == packaged || "${mode}" == raw ]] \
+    || _lib_die "assert_release_results: unknown mode '${mode}' (expected packaged or raw)"
+  problems="$(jq -r \
+    --arg mode "${mode}" \
+    --arg eg_model "${EMBEDDINGGEMMA_MODEL_ID}" \
+    --arg eg_sha "${EMBEDDINGGEMMA_MODEL_SHA256}" \
+    --argjson eg_hidden "${EMBEDDINGGEMMA_HIDDEN_DIM}" \
+    --argjson eg_output "${EMBEDDINGGEMMA_OUTPUT_DIM}" \
+    '{model_id: $eg_model, model_sha256: $eg_sha, n_embd: $eg_hidden, n_embd_out: $eg_output} as $eg_pins
+     | ("smoke", "embeddinggemma_smoke", "benchmark", "correctness") as $k
+     | .[$k] as $r
+     | if $r == null then (if $mode == "packaged" then ".\($k): missing" else empty end)
+       elif ($r | type) != "object" then ".\($k): \($r | tojson), expected a result object"
+       elif $r.passed != true then ".\($k).passed: \($r.passed | tojson), expected true"
+       elif $k == "embeddinggemma_smoke" then
+         $eg_pins | to_entries[] | select($r[.key] != .value)
+         | ".\($k).\(.key): \($r[.key] | tojson), expected \(.value | tojson)"
+       else empty end' "${build_info}")" \
+    || _lib_die "cannot read release results from ${build_info}"
+  [[ -z "${problems}" ]] \
+    || _lib_die "release results rejected (${mode}): ${problems//$'\n'/; }"
 }
