@@ -36,9 +36,9 @@ Single source of truth: [`scripts/config.env`](scripts/config.env).
 
 | Input | Pin |
 |---|---|
-| llama.cpp (compiled engine) | nightly tag `b11630` @ `6868a52cb337450658006ad2f9281c2eb63f1666`, unmodified (HEAD, lightweight tag type/peel and `describe --exact-match` verified; compiled semantic version `0.6.0[-dev]`) |
-| llama-cpp-rs (`llama-cpp-sys-2` build driver) | tag `0.1.159` @ `3cfdd729d65e35da407e5f820edf73201bfa54f6` (crate `0.1.159`). Its vendored llama.cpp `26394b4e` is replaced by the tag above. |
-| Artifact contract | `6` ([CONTRACT.md](CONTRACT.md)) |
+| llama.cpp (compiled engine) | release tag `v0.7.0` @ `620d2225cc436ab0b001e3200e590e3b286ef9ab`, unmodified (HEAD, annotated tag type/peel/tag-object name and `describe --exact-match` verified; compiled semantic version `0.7.0[-dev]`) |
+| llama-cpp-rs (`llama-cpp-sys-2` build driver) | tag `0.1.160` @ `0dd5814c9b061930965d144c1653cd4d05054873` (crate `0.1.160`). Its vendored llama.cpp `d8123504` (`v0.6.0`) is replaced by the tag above. |
+| Artifact contract | `7` ([CONTRACT.md](CONTRACT.md)) |
 | Rust | `1.96.1` (`rust-toolchain.toml`) |
 | CMake | `3.29.6` (`Dockerfile`) |
 | Compiler | Clang 18 (AL2023 `clang18`), GNU libstdc++ |
@@ -60,7 +60,7 @@ build image. CI gates the environment envelope (`EXPECTED_CLANG_MAJOR`, `MIN_GLI
    1. Selects the target profile from the **native** host architecture (`scripts/config.env`).
       It refuses anything that is not a native build (see below). On x86-64 it also runs
       the fail-closed x86-64-v3 CPU gate.
-   2. Clones the pinned llama-cpp-rs commit and checks out llama.cpp `b11630` in place of
+   2. Clones the pinned llama-cpp-rs commit and checks out llama.cpp `v0.7.0` in place of
       the crate's submodule, verifying both by commit.
    3. Builds `llama-cpp-sys-2` with the profile's fixed flags injected:
       - ARM64: ggml `GGML_CPU_ARM_ARCH` for dotprod, plus `-mtune`.
