@@ -23,8 +23,8 @@ name: build-static-llama-cpp
 # profiles) come from scripts/config.env; build.sh verifies them by commit and
 # verify-provenance.sh re-checks the recorded build-info.json before anything is uploaded:
 # --raw (pins only) right after build.sh, then --packaged (pins plus passing smoke,
-# EmbeddingGemma smoke, benchmark and correctness results) after package.sh and again in
-# the release job before publishing. No build caches are used.
+# EmbeddingGemma smoke, logits smoke, benchmark and correctness results) after package.sh
+# and again in the release job before publishing. No build caches are used.
 #
 # Optional PGO (profile-guided optimization): enable via the `pgo` workflow_dispatch input,
 # or the RELEASE_PGO repo variable ("1") for tag-triggered releases. Each variant trains its
@@ -185,6 +185,9 @@ jobs:
               SMOKE_RESULT="$RESULTS/smoke.json" \
                 cargo run --release --manifest-path smoke/Cargo.toml
               bash scripts/embeddinggemma-smoke.sh
+              # Output semantics (contract v6): generation logits survive on a model with
+              # an LM head, pooled embeddings get none.
+              bash scripts/logits-smoke.sh
               # Numerical-correctness gate: tuned-vs-generic + golden parity + self-
               # consistency, on the reference model and the deployed SMOKE_MODEL.
               bash scripts/correctness.sh
@@ -199,7 +202,7 @@ jobs:
       # the pinned llama.cpp tag + commit, llama-cpp-rs ref + commit, llama-cpp-sys-2
       # version, contract version and THIS matrix profile (arch, triple, CPU baseline,
       # flags) from scripts/config.env, and a native build. Packaged mode also requires
-      # passing smoke, embeddinggemma_smoke, benchmark and correctness results.
+      # passing smoke, embeddinggemma_smoke, logits_smoke, benchmark and correctness results.
       - name: Verify provenance (build-info.json vs scripts/config.env)
         run: bash scripts/verify-provenance.sh --packaged dist/build-info.json "${{ matrix.profile }}"
 
@@ -267,7 +270,7 @@ jobs:
             [[ -f "${tarball}" ]] || { echo "::error::missing ${tarball}" >&2; exit 1; }
             sha256sum -c "${tarball}.sha256"
             # The loose build-info must be the one inside the tarball, and must verify
-            # against THIS variant's profile, with all four release results passing.
+            # against THIS variant's profile, with all five release results passing.
             tar xzf "${tarball}" -O ./build-info.json | cmp - "build-info-${ARTIFACT_VARIANT}.json"
             bash ../scripts/verify-provenance.sh --packaged "build-info-${ARTIFACT_VARIANT}.json" "${profile}"
             expected+=("${tarball}" "${tarball}.sha256" "build-info-${ARTIFACT_VARIANT}.json" "SHA256SUMS-${ARTIFACT_VARIANT}")
@@ -281,15 +284,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # The step above verified every build-info against these pins and every tarball
+          # against its .sha256, so the notes quote the verified values.
+          source scripts/config.env
           {
             echo "static-llama-cpp ${GITHUB_REF_NAME}: prebuilt static llama.cpp archives, two native production variants."
             echo
-            echo "| Architecture | Target | CPU baseline | Asset |"
-            echo "|---|---|---|---|"
+            echo "Engine: llama.cpp \`${LLAMA_CPP_TAG}\` @ \`${EXPECTED_LLAMA_CPP_COMMIT}\`, built by llama-cpp-rs \`${CRATE_REF}\` @ \`${EXPECTED_CRATE_COMMIT}\`. Artifact contract v${ARTIFACT_CONTRACT_VERSION}."
+            echo
+            echo "| Architecture | Target | CPU baseline | Asset | SHA-256 |"
+            echo "|---|---|---|---|---|"
             for f in release-assets/build-info-*.json; do
               v="${f#release-assets/build-info-}"; v="${v%.json}"
-              jq -r --arg t "static-llama-cpp-${GITHUB_REF_NAME}-${v}.tar.gz" \
-                '"| \(.architecture) | \(.target_triple) | \(.cpu_baseline) (`\(.effective_arch_flags)`) | `\($t)` |"' "${f}"
+              t="static-llama-cpp-${GITHUB_REF_NAME}-${v}.tar.gz"
+              read -r sha _ < "release-assets/${t}.sha256"
+              jq -r --arg t "${t}" --arg sha "${sha}" \
+                '"| \(.architecture) | \(.target_triple) | \(.cpu_baseline) (`\(.effective_arch_flags)`) | `\($t)` | `\($sha)` |"' "${f}"
             done
             echo
             echo "Each variant was built natively on its own architecture (no cross compilation, no CPU emulation)."

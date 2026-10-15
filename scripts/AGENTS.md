@@ -17,8 +17,10 @@ config.env
           +--> build.sh
           +--> correctness.sh
           +--> bench.sh
-          +--> package.sh            (assert_release_results)
-          +--> verify-provenance.sh  (assert_release_results)
+          +--> embeddinggemma-smoke.sh  (fetch_pinned_model)
+          +--> logits-smoke.sh          (fetch_pinned_model)
+          +--> package.sh               (assert_release_results)
+          +--> verify-provenance.sh     (assert_release_results)
 
 check-x86-64-v3.sh  (compiles and runs x86-64-v3-probe.c)
    |
@@ -138,8 +140,10 @@ for it here as well.
 Compare metadata against canonical configuration rather than trusting a value simply
 because the build generated it.
 
-It has two modes. `--packaged`, the default, also requires the four release results
-(`smoke`, `embeddinggemma_smoke`, `benchmark`, `correctness`) to be present and passing.
+It has two modes. `--packaged`, the default, also requires the five release results
+(`smoke`, `embeddinggemma_smoke`, `logits_smoke`, `benchmark`, `correctness`) to be
+present, passing, and matching their pins (model ids and SHA-256s, and the `host_logits`
+expectations of contract v6).
 Use it on anything `package.sh` produced. `--raw` is only for fresh `build.sh` output,
 which has no results yet. Do not use `--raw` after packaging, and do not make it the
 default.
@@ -158,7 +162,7 @@ results. Change it there, not in either caller, and keep the
 
 Do not turn an incomplete build into a releasable artifact.
 
-The smoke, benchmark, and correctness result JSON is merged verbatim into
+The smoke (all three), benchmark, and correctness result JSON is merged verbatim into
 `build-info.json`, so those result schemas are consumer-visible. Changing them requires
 review against `CONTRACT.md`.
 

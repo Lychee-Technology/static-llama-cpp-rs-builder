@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 #
-# Finalize the release: merge the smoke, EmbeddingGemma smoke, benchmark and correctness
-# results into build-info.json, gather license files, and generate SHA256SUMS over every
-# shipped file. Run AFTER build.sh, both smoke steps, correctness.sh and bench.sh.
+# Finalize the release: merge the smoke, EmbeddingGemma smoke, logits smoke, benchmark and
+# correctness results into build-info.json, gather license files, and generate SHA256SUMS
+# over every shipped file. Run AFTER build.sh, the three smoke steps, correctness.sh and
+# bench.sh.
 #
 # Required inputs (JSON files written by those steps; ALLOW_MISSING_RESULTS=1 is dev-only),
-# merged into build-info.json as .smoke, .embeddinggemma_smoke, .benchmark, .correctness:
-#   RESULTS/smoke.json  RESULTS/embeddinggemma-smoke.json  RESULTS/bench.json
-#   RESULTS/correctness.json
+# merged into build-info.json as .smoke, .embeddinggemma_smoke, .logits_smoke, .benchmark,
+# .correctness:
+#   RESULTS/smoke.json  RESULTS/embeddinggemma-smoke.json  RESULTS/logits-smoke.json
+#   RESULTS/bench.json  RESULTS/correctness.json
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,29 +27,31 @@ log() { printf '\033[1;34m[package]\033[0m %s\n' "$*"; }
 
 # --- Merge smoke + benchmark + correctness results --------------------------------
 smoke_json="null"; bench_json="null"; correctness_json="null"
-embeddinggemma_json="null"
+embeddinggemma_json="null"; logits_json="null"
 [[ -f "${RESULTS}/smoke.json" ]] && smoke_json="$(cat "${RESULTS}/smoke.json")"
 [[ -f "${RESULTS}/bench.json" ]] && bench_json="$(cat "${RESULTS}/bench.json")"
 [[ -f "${RESULTS}/correctness.json" ]] && correctness_json="$(cat "${RESULTS}/correctness.json")"
 [[ -f "${RESULTS}/embeddinggemma-smoke.json" ]] && embeddinggemma_json="$(cat "${RESULTS}/embeddinggemma-smoke.json")"
+[[ -f "${RESULTS}/logits-smoke.json" ]] && logits_json="$(cat "${RESULTS}/logits-smoke.json")"
 
 tmp="$(mktemp)"
 trap 'rm -f "${tmp}"' EXIT
 jq --argjson smoke "${smoke_json}" --argjson bench "${bench_json}" --argjson correctness "${correctness_json}" \
-   --argjson embeddinggemma "${embeddinggemma_json}" \
-   '.smoke = $smoke | .benchmark = $bench | .correctness = $correctness | .embeddinggemma_smoke = $embeddinggemma' \
+   --argjson embeddinggemma "${embeddinggemma_json}" --argjson logits "${logits_json}" \
+   '.smoke = $smoke | .benchmark = $bench | .correctness = $correctness
+    | .embeddinggemma_smoke = $embeddinggemma | .logits_smoke = $logits' \
    "${DIST}/build-info.json" > "${tmp}"
 
-# The contract says a release carries PASSING smoke + EmbeddingGemma smoke + benchmark +
-# correctness results. Enforce it on the merged build-info.json, before it replaces the
-# raw one, with the same check verify-provenance.sh repeats after packaging, so we can't
-# ship a release with missing/failed results. ALLOW_MISSING_RESULTS=1 skips the gate here,
+# The contract says a release carries PASSING smoke + EmbeddingGemma smoke + logits smoke +
+# benchmark + correctness results. Enforce it on the merged build-info.json, before it
+# replaces the raw one, with the same check verify-provenance.sh repeats after packaging, so
+# we can't ship a release with missing/failed results. ALLOW_MISSING_RESULTS=1 skips the gate here,
 # for local dev packaging only; verify-provenance.sh still rejects such results.
 if [[ "${ALLOW_MISSING_RESULTS:-0}" != "1" ]]; then
   assert_release_results packaged "${tmp}"
 fi
 mv "${tmp}" "${DIST}/build-info.json"
-log "Merged smoke/embeddinggemma_smoke/benchmark/correctness results into build-info.json"
+log "Merged smoke/embeddinggemma_smoke/logits_smoke/benchmark/correctness results into build-info.json"
 
 # --- License files ----------------------------------------------------------------
 mkdir -p "${DIST}/LICENSES"

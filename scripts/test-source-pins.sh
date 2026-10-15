@@ -96,9 +96,32 @@ expect_verify_rejects() {
     verify_provenance "--${mode}" "${TMP}/bad-provenance.json" "${profile}"
 }
 
+# Pin cases for the smoke results: "<jq alteration of a packaged build-info.json>|<diagnostic>".
+# Each changes one pinned field, so a v5 result (no host_logits) or a pooled run that still
+# exposed logits fails, as does a control run that lost generation logits.
+result_pin_cases=(
+  '.smoke.host_logits=true|.smoke.host_logits: true, expected false'
+  'del(.smoke.host_logits)|.smoke.host_logits: null, expected false'
+  '.embeddinggemma_smoke.model_id="other/model"|.embeddinggemma_smoke.model_id: "other/model"'
+  '.embeddinggemma_smoke.model_sha256="wrong"|.embeddinggemma_smoke.model_sha256: "wrong"'
+  '.embeddinggemma_smoke.n_embd=768|.embeddinggemma_smoke.n_embd: 768, expected 512'
+  '.embeddinggemma_smoke.n_embd_out=512|.embeddinggemma_smoke.n_embd_out: 512, expected 768'
+  '.embeddinggemma_smoke.host_logits=true|.embeddinggemma_smoke.host_logits: true, expected false'
+  'del(.embeddinggemma_smoke.host_logits)|.embeddinggemma_smoke.host_logits: null, expected false'
+  '.logits_smoke.model_id="other/model"|.logits_smoke.model_id: "other/model"'
+  '.logits_smoke.model_sha256="wrong"|.logits_smoke.model_sha256: "wrong"'
+  '.logits_smoke.host_logits.generation=false|.logits_smoke.host_logits: {"generation":false'
+  '.logits_smoke.host_logits.embeddings_mean=true|.logits_smoke.host_logits: {"generation":true,"embeddings_none":true,"embeddings_mean":true,'
+  '.logits_smoke.host_logits.embeddings_mean_set_off=false|.logits_smoke.host_logits: {"generation":true,"embeddings_none":true,"embeddings_mean":false,"embeddings_mean_set_off":false,'
+  'del(.logits_smoke.host_logits.embeddings_mean_set_on)|.logits_smoke.host_logits: {"generation":true,"embeddings_none":true,"embeddings_mean":false,"embeddings_mean_set_off":true,"embeddings_last":false,"embeddings_cls":false}, expected'
+  '.logits_smoke.host_logits.embeddings_last=true|"embeddings_mean_set_on":false,"embeddings_last":true,"embeddings_cls":false}, expected'
+  '.logits_smoke.host_logits.embeddings_cls=true|"embeddings_last":false,"embeddings_cls":true}, expected'
+  'del(.logits_smoke.host_logits)|.logits_smoke.host_logits: null'
+)
+
 # Synthetic build-info.json per profile, from the canonical pins; never a production artifact.
-# The raw form mirrors build.sh output: null result placeholders, no embeddinggemma_smoke.
-# The packaged form adds the four passing results package.sh merges.
+# The raw form mirrors build.sh output: null result placeholders, no embeddinggemma_smoke or
+# logits_smoke. The packaged form adds the five passing results package.sh merges.
 source "${ROOT}/scripts/config.env"
 for profile in ${SUPPORTED_TARGET_PROFILES}; do
   set_target_profile "${profile}"
@@ -130,8 +153,12 @@ for profile in ${SUPPORTED_TARGET_PROFILES}; do
       smoke:null,benchmark:null,correctness:null}' > "${metadata}"
   jq --arg id "${EMBEDDINGGEMMA_MODEL_ID}" --arg sha "${EMBEDDINGGEMMA_MODEL_SHA256}" \
     --argjson hidden "${EMBEDDINGGEMMA_HIDDEN_DIM}" --argjson output "${EMBEDDINGGEMMA_OUTPUT_DIM}" \
-    '.smoke={passed:true} | .benchmark={passed:true} | .correctness={passed:true}
-     | .embeddinggemma_smoke={passed:true,model_id:$id,model_sha256:$sha,n_embd:$hidden,n_embd_out:$output}' \
+    --arg ls_id "${LOGITS_SMOKE_MODEL_ID}" --arg ls_sha "${LOGITS_SMOKE_MODEL_SHA256}" \
+    --argjson ls_logits "${LOGITS_SMOKE_HOST_LOGITS}" \
+    '.smoke={passed:true,host_logits:false} | .benchmark={passed:true} | .correctness={passed:true}
+     | .embeddinggemma_smoke={passed:true,model_id:$id,model_sha256:$sha,n_embd:$hidden,
+                              n_embd_out:$output,host_logits:false}
+     | .logits_smoke={passed:true,model_id:$ls_id,model_sha256:$ls_sha,host_logits:$ls_logits}' \
     "${metadata}" > "${packaged}"
 
   # Raw mode accepts fresh build.sh metadata; packaged mode, the default, requires results.
@@ -154,7 +181,7 @@ for profile in ${SUPPORTED_TARGET_PROFILES}; do
   done
 
   # Packaged mode requires every result, passing; raw mode still rejects a failed one.
-  for result in smoke embeddinggemma_smoke benchmark correctness; do
+  for result in smoke embeddinggemma_smoke logits_smoke benchmark correctness; do
     expect_verify_rejects packaged "${profile}" "${packaged}" ".${result}: missing" "del(.${result})"
     expect_verify_rejects packaged "${profile}" "${packaged}" ".${result}: missing" ".${result}=null"
     expect_verify_rejects packaged "${profile}" "${packaged}" ".${result}: true, expected a result object" \
@@ -167,11 +194,11 @@ for profile in ${SUPPORTED_TARGET_PROFILES}; do
       ".${result}.passed=false"
   done
 
-  # The EmbeddingGemma result must match its pins in both modes.
-  for alteration in '.model_id="other/model"' '.model_sha256="wrong"' '.n_embd=768' '.n_embd_out=512'; do
+  # The smoke results must match their pins in both modes.
+  for case in "${result_pin_cases[@]}"; do
+    IFS='|' read -r alteration diagnostic <<<"${case}"
     for mode in packaged raw; do
-      expect_verify_rejects "${mode}" "${profile}" "${packaged}" ".embeddinggemma_smoke${alteration%%=*}: " \
-        ".embeddinggemma_smoke${alteration}"
+      expect_verify_rejects "${mode}" "${profile}" "${packaged}" "${diagnostic}" "${alteration}"
     done
   done
 done
@@ -192,13 +219,18 @@ stage_package() {
   rm -rf "${package_dir}"
   mkdir -p "${package_dir}/dist" "${package_dir}/results"
   cp "${raw_build_info}" "${package_dir}/dist/build-info.json"
-  for result in smoke bench correctness; do
+  for result in bench correctness; do
     echo '{"passed":true}' > "${package_dir}/results/${result}.json"
   done
+  echo '{"passed":true,"host_logits":false}' > "${package_dir}/results/smoke.json"
   jq -n --arg id "${EMBEDDINGGEMMA_MODEL_ID}" --arg sha "${EMBEDDINGGEMMA_MODEL_SHA256}" \
     --argjson hidden "${EMBEDDINGGEMMA_HIDDEN_DIM}" --argjson output "${EMBEDDINGGEMMA_OUTPUT_DIM}" \
-    '{passed:true,n_embd:$hidden,n_embd_out:$output,n_tokens:15,l2_norm:1.0,
+    '{passed:true,n_embd:$hidden,n_embd_out:$output,n_tokens:15,l2_norm:1.0,host_logits:false,
       model_id:$id,model_sha256:$sha}' > "${package_dir}/results/embeddinggemma-smoke.json"
+  jq -n --arg id "${LOGITS_SMOKE_MODEL_ID}" --arg sha "${LOGITS_SMOKE_MODEL_SHA256}" \
+    --argjson logits "${LOGITS_SMOKE_HOST_LOGITS}" \
+    '{passed:true,n_vocab:512,n_tokens:15,host_logits:$logits,max_logit_delta:0,
+      model_id:$id,model_sha256:$sha}' > "${package_dir}/results/logits-smoke.json"
 }
 alter_result() {
   local result="${package_dir}/results/$1.json"
@@ -220,7 +252,8 @@ expect_package_rejects() {
 }
 
 # Result file in RESULTS : key in build-info.json.
-results_map=(smoke:smoke embeddinggemma-smoke:embeddinggemma_smoke bench:benchmark correctness:correctness)
+results_map=(smoke:smoke embeddinggemma-smoke:embeddinggemma_smoke logits-smoke:logits_smoke
+             bench:benchmark correctness:correctness)
 
 stage_package
 run_package > "${TMP}/package.log" 2>&1 \
@@ -246,10 +279,15 @@ for pair in "${results_map[@]}"; do
     expect_package_rejects "${result} result .passed=${passed}" ".${key}.passed: ${passed}, expected true"
   done
 done
-for alteration in '.model_id="other/model"' '.model_sha256="wrong"' '.n_embd=768' '.n_embd_out=512'; do
+# The same pin cases, applied to the result file package.sh merges as that key.
+for case in "${result_pin_cases[@]}"; do
+  IFS='|' read -r alteration diagnostic <<<"${case}"
+  key="$(sed -E 's/^(del\()?\.([a-z_]+)\..*/\2/' <<<"${alteration}")" result=""
+  for pair in "${results_map[@]}"; do [[ "${pair#*:}" == "${key}" ]] && result="${pair%%:*}"; done
+  [[ -n "${result}" ]] || { echo "FAIL: no result file for pin case ${alteration}" >&2; exit 1; }
   stage_package
-  alter_result embeddinggemma-smoke "${alteration}"
-  expect_package_rejects "EmbeddingGemma smoke result ${alteration}" ".embeddinggemma_smoke${alteration%%=*}: "
+  alter_result "${result}" "${alteration/.${key}/}"
+  expect_package_rejects "${result} result ${alteration/.${key}/}" "${diagnostic}"
 done
 
 # ALLOW_MISSING_RESULTS=1 (local dev only) packages missing or failed results; the packaged

@@ -51,6 +51,15 @@ not replace the legacy model or its independent golden. `../CONTRACT.md` describ
 the additional result and its limited coverage. Read pooled buffers using
 `llama_model_n_embd_out`, not the hidden `llama_model_n_embd` width.
 
+Contract v6 makes a pooled embeddings context reserve no host logits: both pooled runs
+require `llama_get_logits` to return `NULL` and record `"host_logits":false`. Neither
+embedding fixture has an LM head, so `SMOKE_MODE=logits` (run by
+`../scripts/logits-smoke.sh`) uses a third pinned fixture, a tiny generative model, to
+prove logits still exist in every mode that needs them. `LOGITS_MODES` in `src/main.rs`
+and `LOGITS_SMOKE_HOST_LOGITS` in `../scripts/lib.sh` describe the same expectations; a
+unit test keeps them equal, and `../CONTRACT.md` "Output semantics" is the authority for
+both.
+
 ## Output behavior
 
 The release pipeline consumes the process exit status and the machine-readable result
@@ -58,7 +67,8 @@ written to `SMOKE_RESULT`.
 
 That result is required, not optional: `scripts/package.sh` refuses to package unless it
 exists with `passed == true`, and it is merged verbatim into the released
-`build-info.json` as `.smoke`. Changing its fields requires review against `CONTRACT.md`.
+`build-info.json` as `.smoke` (`.embeddinggemma_smoke`, `.logits_smoke` for the other
+two runs). Changing its fields requires review against `CONTRACT.md`.
 
 Preserve that interface when refactoring.
 
@@ -72,7 +82,8 @@ For Rust changes run:
 cargo fmt --manifest-path smoke/Cargo.toml -- --check
 ```
 
-Then exercise the smoke binary against a real built artifact.
+The unit tests need a built artifact to link against (`STATIC_LLAMA_DIR`). Then exercise
+the smoke binary against that artifact in both modes.
 
 Do not weaken `scripts/consume.build.rs` merely to make an artifact-free Cargo command
 succeed.
