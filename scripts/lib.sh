@@ -406,17 +406,39 @@ x86_disasm_scan() {
     }'
 }
 
+# --- Pinned test models -----------------------------------------------------------------
+# fetch_pinned_model URL SHA256 DEST: make DEST the file whose SHA-256 is SHA256, reusing a
+# verified copy or downloading URL. A download that does not verify is never moved into
+# place, so DEST only ever holds the pinned bytes.
+fetch_pinned_model() {
+  local url="$1" sha="$2" dest="$3"
+  mkdir -p "$(dirname "${dest}")"
+  if [[ -f "${dest}" ]] && echo "${sha}  ${dest}" | sha256sum -c --status -; then
+    return 0
+  fi
+  _lib_log "fetching ${url}"
+  curl -fSL --retry 3 "${url}" -o "${dest}.download"
+  echo "${sha}  ${dest}.download" | sha256sum -c - >&2 \
+    || _lib_die "${url} does not match the pinned SHA-256 ${sha}"
+  mv "${dest}.download" "${dest}"
+}
+
 # --- Release results ------------------------------------------------------------------
 # The one definition of the results a release must carry (CONTRACT.md "Guarantees"). The
 # packaging gate (package.sh) and the verifier (verify-provenance.sh, after packaging and in
 # the release job) both call this, so they cannot drift. BUILD_INFO is a build-info.json,
 # into which package.sh merges each result verbatim. A result passes when it is an object
-# with `passed == true` (the boolean); embeddinggemma_smoke must also match the
-# EMBEDDINGGEMMA_* pins. Missing means absent or null (build.sh writes null placeholders).
+# with `passed == true` (the boolean) and carries every field of its entry in the pins
+# below. Missing means absent or null (build.sh writes null placeholders).
 #   MODE packaged  every result must be present and pass (any packaged build-info.json);
 #   MODE raw       fresh build.sh metadata has no results yet: none is required, but a
 #                  result that is present must still pass.
 # Dies listing every problem, one `.path: actual, expected ...` entry each.
+#
+# The output semantics of contract v6 (CONTRACT.md "Output semantics"): both pooled smoke
+# runs found no host logits, and the generative control found them exactly here. The modes
+# are the ones smoke/src/main.rs LOGITS_MODES runs.
+LOGITS_SMOKE_HOST_LOGITS='{"generation":true,"embeddings_none":true,"embeddings_mean":false,"embeddings_mean_set_off":true,"embeddings_mean_set_on":false}'
 assert_release_results() {
   local mode="$1" build_info="$2" problems
   [[ "${mode}" == packaged || "${mode}" == raw ]] \
@@ -427,16 +449,22 @@ assert_release_results() {
     --arg eg_sha "${EMBEDDINGGEMMA_MODEL_SHA256}" \
     --argjson eg_hidden "${EMBEDDINGGEMMA_HIDDEN_DIM}" \
     --argjson eg_output "${EMBEDDINGGEMMA_OUTPUT_DIM}" \
-    '{model_id: $eg_model, model_sha256: $eg_sha, n_embd: $eg_hidden, n_embd_out: $eg_output} as $eg_pins
-     | ("smoke", "embeddinggemma_smoke", "benchmark", "correctness") as $k
+    --arg ls_model "${LOGITS_SMOKE_MODEL_ID}" \
+    --arg ls_sha "${LOGITS_SMOKE_MODEL_SHA256}" \
+    --argjson ls_logits "${LOGITS_SMOKE_HOST_LOGITS}" \
+    '{smoke: {host_logits: false},
+      embeddinggemma_smoke: {model_id: $eg_model, model_sha256: $eg_sha, n_embd: $eg_hidden,
+                             n_embd_out: $eg_output, host_logits: false},
+      logits_smoke: {model_id: $ls_model, model_sha256: $ls_sha, host_logits: $ls_logits}} as $pins
+     | ("smoke", "embeddinggemma_smoke", "logits_smoke", "benchmark", "correctness") as $k
      | .[$k] as $r
      | if $r == null then (if $mode == "packaged" then ".\($k): missing" else empty end)
        elif ($r | type) != "object" then ".\($k): \($r | tojson), expected a result object"
        elif $r.passed != true then ".\($k).passed: \($r.passed | tojson), expected true"
-       elif $k == "embeddinggemma_smoke" then
-         $eg_pins | to_entries[] | select($r[.key] != .value)
+       else
+         ($pins[$k] // {}) | to_entries[] | select($r[.key] != .value)
          | ".\($k).\(.key): \($r[.key] | tojson), expected \(.value | tojson)"
-       else empty end' "${build_info}")" \
+       end' "${build_info}")" \
     || _lib_die "cannot read release results from ${build_info}"
   [[ -z "${problems}" ]] \
     || _lib_die "release results rejected (${mode}): ${problems//$'\n'/; }"

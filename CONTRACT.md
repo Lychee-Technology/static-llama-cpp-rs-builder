@@ -1,4 +1,4 @@
-# Artifact Contract — v5
+# Artifact Contract — v6
 
 This defines exactly what a release contains, how to link it, and how to verify it.
 Both llama.cpp and `llama-cpp-rs` lack strong semver/ABI stability, so **consumers pin a
@@ -6,7 +6,7 @@ contract version** and re-verify on every bump.
 
 ## Contract version
 
-`artifact_contract_version` (in `build-info.json`) is currently **`5`**. It **must** bump on
+`artifact_contract_version` (in `build-info.json`) is currently **`6`**. It **must** bump on
 any change to: the set of shipped `.a`, the link line, enabled cargo features, the binding
 ABI (llama-cpp-rs commit / compiled llama.cpp commit), the `dist/` layout, or the
 guarantees a release carries. LTEmbed pins the contract version it supports and fails
@@ -18,6 +18,7 @@ closed on an unexpected value.
 | v3 | Added the numerical-correctness gate and the `correctness` block in `build-info.json`. |
 | v4 | **llama.cpp `v0.6.0` (`d81235049384534c167caea52b85a694f6103d14`)**, compiled through llama-cpp-rs `0.1.159` (`3cfdd729d65e35da407e5f820edf73201bfa54f6`) with its vendored llama.cpp submodule (`26394b4e`) replaced by the tag. `bindings.rs` and `include/` are regenerated from the new `llama.h`/`ggml*.h`: **binding ABI changed — rebuild consumers against the new `bindings.rs`.** The crate is now built with `--no-default-features`. Its default feature set is `["common"]`, which pre-v4 releases silently enabled, so their `bindings.rs` also carried `llama_rs_*` declarations that no shipped archive defines; v4 drops them and gates on their absence. `build-info.json` provenance is restructured into `llama_cpp_rs` / `llama_cpp_sys_2` / `llama_cpp` blocks, with fail-closed tag/commit verification: `llama_cpp_sys_2.git_tag` and `llama_cpp.submodule_commit` are removed, replaced by `llama_cpp_rs.git_ref`/`.commit` and `llama_cpp.tag`/`.commit`. (v3 shipped `llama-cpp-sys-2` 0.1.151 with its vendored llama.cpp `9e3b928`.) **Second production variant: x86-64.** v4 adds `x86_64-unknown-linux-gnu` at the fixed `x86-64-v3` baseline, shipped as `static-llama-cpp-<tag>-x86_64-v3-linux-gnu.tar.gz` next to the unchanged `static-llama-cpp-<tag>-aarch64-graviton2.tar.gz`. Each variant is built natively on its own architecture. `build-info.json` gains `target_profile`, `architecture`, `cpu_baseline`, `cpu_profile`, `host`, `runner`, `pgo.architecture`/`.cpu_baseline`/`.use_flags` and the x86 `arch_flag_summary` keys. Because both variants share one GitHub Release, the loose release assets are per-variant: `build-info-<variant>.json` and `SHA256SUMS-<variant>`. **Unchanged:** the `.a` set, the link line and order, the ARM64 CPU profile, the toolchain (Clang 18, glibc ≥ 2.34) and the correctness thresholds. |
 | v5 | **llama.cpp `b11577` (`cbe28bb3cb0758f0c566a9a3561766821aeb0748`)**, containing EmbeddingGemma 2 support. `bindings.rs` and `include/` are regenerated: **binding ABI changed — rebuild consumers against the shipped `bindings.rs`.** `llama_context_params` gains `moe_cache_size: usize` after `type_v`, shifting every later field (160 → 168 bytes); it is returned by value from `llama_context_default_params` and passed by value to `llama_init_from_model`. `llama_perf_context_data` gains `n_reallocs_same`/`n_reallocs_diff` (48 → 56 bytes, returned by value from `llama_perf_context`). `ggml_backend_sched_set_copy_callback`, `ggml_backend_sched_set_realloc_callback` and `LLAMA_VOCAB_TYPE_PLAMO3` are added; `llama_model_params` is unchanged. Sizes are the same on both 64-bit variants. The tag is lightweight, so `llama_cpp.tag_type` is now the pinned Git object type `commit` (v4: `tag`); the tag must still resolve to the exact pinned commit and match `describe --exact-match`. `llama_cpp.embedded_version` becomes a fail-closed gate on the separately pinned semantic version `0.6.0[-dev]`, because nightly tag numbers are not versions. A second required text-only smoke result, `embeddinggemma_smoke`, records the pinned ggml-org Q8_0 model identity/hash and full projected dimensions (hidden 512, output 768). The original `smoke` result also gains `n_embd_out` and the actual `model_sha256`. **Unchanged:** native profiles, the `.a` set, the link line and order, the no-default-features configuration and the legacy numerical/performance thresholds. This contract does not claim EmbeddingGemma 2 FP32 parity or multimodal coverage. |
+| v6 | **llama.cpp `b11630` (`6868a52cb337450658006ad2f9281c2eb63f1666`)**, unmodified upstream, compiled through the same llama-cpp-rs `0.1.159` driver. **Output semantics changed:** a context with `embeddings = true` and a pooling type other than `NONE` no longer builds the LM head or reserves host logits (upstream [#30255](https://github.com/ggml-org/llama.cpp/pull/30255), [#30445](https://github.com/ggml-org/llama.cpp/pull/30445); [#30461](https://github.com/ggml-org/llama.cpp/pull/30461) drops a redundant graph expansion from the embedding models), so `llama_get_logits` returns `NULL` after a pooled encode or decode. v5 reserved and zeroed `n_vocab` floats per output token anyway: 1 MiB per input token for EmbeddingGemma 2, 8 GiB at 8192 tokens. Generation and `NONE`-pooled embeddings still get logits; see [Output semantics](#output-semantics-v6). Both smoke results gain `host_logits: false`, and a fifth required result, `logits_smoke`, records the output modes of a pinned generative model that has an LM head. **Binding ABI unchanged:** `bindings.rs` is byte-identical to v5's on both variants, and `include/` differs only in two comments (`llama.h`, on the `embeddings` field; `ggml.h`, a `ggml_mul_mat_id` note). The archives define no new or removed symbol that a shipped header declares; only internals changed (C++ symbols and the undeclared ggml-cpu kernel `ggml_vec_dot_q2_0_q8_0_generic`). **Unchanged:** native profiles, the `.a` set, the link line and order, features, the pinned build driver and every numerical/performance threshold. |
 
 ## Support matrix
 
@@ -49,14 +50,14 @@ or negotiated by CI.
 lib/            libllama.a libggml.a libggml-cpu.a libggml-base.a
 include/        llama.h ggml*.h gguf.h ... (from the compiled llama.cpp tag/commit)
 bindings.rs     generated FFI bindings (bindgen, Consts enums, prepend_enum_name=false)
-build-info.json full bill-of-materials + provenance + smoke/embeddinggemma_smoke/benchmark/correctness results
+build-info.json full bill-of-materials + provenance + smoke/embeddinggemma_smoke/logits_smoke/benchmark/correctness results
 consume.build.rs drop-in build.rs (this repo's scripts/consume.build.rs)
 CONTRACT.md     this file
 SHA256SUMS      sha256 over every other file in the release
 LICENSES/       llama.cpp (covers ggml) and builder licenses (all MIT)
 ```
 
-## Build profile (v5)
+## Build profile (v6)
 
 - **Native build only.** Each variant is compiled on a host of its own architecture, for that
   host's triple: actual host arch == container arch == compiler arch == artifact arch. These
@@ -98,17 +99,17 @@ LICENSES/       llama.cpp (covers ggml) and builder licenses (all MIT)
 
   Its CPU TUs' `-m` flags are therefore a subset of x86-64-v3. Without `GGML_BACKEND_DL`
   there is no runtime ISA dispatch.
-- Engine: **llama.cpp `b11577`** (lightweight tag, exact Git object type `commit`) at commit
-  **`cbe28bb3cb0758f0c566a9a3561766821aeb0748`** from `ggml-org/llama.cpp`. Before compiling,
-  the build verifies that `HEAD` equals that commit, that the tag peels to it, and that
-  `git describe --tags --exact-match` is `b11577`. After compiling, it verifies that the
-  generated `llama-version.h` embeds the same commit and the separately pinned semantic
-  version `0.6.0` or `0.6.0-dev`. The version is never inferred from a
+- Engine: **llama.cpp `b11630`** (lightweight tag, exact Git object type `commit`) at commit
+  **`6868a52cb337450658006ad2f9281c2eb63f1666`** from `ggml-org/llama.cpp`, unmodified.
+  Before compiling, the build verifies that `HEAD` equals that commit, that the tag peels
+  to it, and that `git describe --tags --exact-match` is `b11630`. After compiling, it
+  verifies that the generated `llama-version.h` embeds the same commit and the separately
+  pinned semantic version `0.6.0` or `0.6.0-dev`. The version is never inferred from a
   directory name, crate version or release name.
 - Build driver: `llama-cpp-sys-2` from llama-cpp-rs, git tag **`0.1.159`** (a lightweight
   tag; verified to resolve to commit **`3cfdd729d65e35da407e5f820edf73201bfa54f6`**, package
-  version `0.1.159`). The crate pins `26394b4e`, not `b11577`. The build therefore
-  verifies that gitlink and then replaces it with the `b11577` checkout (both commits
+  version `0.1.159`). The crate pins `26394b4e`, not `b11630`. The build therefore
+  verifies that gitlink and then replaces it with the `b11630` checkout (both commits
   are recorded). Its `build.rs`
   hardcodes `GGML_CPU_ARM_ARCH=armv8-a`, so on ARM64 that one literal is rewritten to the
   N1 ISA under an exact-count check. On x86-64 the crate adds no `-march` (it only does so
@@ -192,9 +193,10 @@ LICENSES/       llama.cpp (covers ggml) and builder licenses (all MIT)
    commit you validated against. Also check `jq -r .target_profile` is the variant you expect
    (`aarch64-graviton2` / `x86_64-v3`). `scripts/verify-provenance.sh --packaged
    <build-info.json> <profile>` (bash + jq) checks every pin in `build-info.json` against
-   this repo's `scripts/config.env`. It also requires the four release results (`smoke`,
-   `embeddinggemma_smoke`, `benchmark`, `correctness`) to be present with `passed == true`,
-   and `embeddinggemma_smoke` to match its pins. A downloaded release is always packaged, and
+   this repo's `scripts/config.env`. It also requires the five release results (`smoke`,
+   `embeddinggemma_smoke`, `logits_smoke`, `benchmark`, `correctness`) to be present with
+   `passed == true`, and the three smoke results to match their pins, including the output
+   semantics below. A downloaded release is always packaged, and
    `--packaged` is the default. `--raw` is for fresh `build.sh` output, before any results
    exist, and is not a release check.
 3. **Link.** Copy `consume.build.rs` to your crate's `build.rs` and set
@@ -212,6 +214,58 @@ LICENSES/       llama.cpp (covers ggml) and builder licenses (all MIT)
    The high-level `llama-cpp-2` safe API is **not** part of this contract; wrap the FFI
    yourself if you need a safe layer.
 
+## Output semantics (v6)
+
+What a context exposes on the host after `llama_encode` / `llama_decode`, by its
+`llama_context_params` (llama.cpp `b11630`, upstream
+[#30255](https://github.com/ggml-org/llama.cpp/pull/30255) and
+[#30445](https://github.com/ggml-org/llama.cpp/pull/30445)):
+
+| `embeddings` | `pooling_type` | Host logits (`llama_get_logits`) | Embeddings |
+| --- | --- | --- | --- |
+| `false` | any | `n_vocab` floats per output token | none |
+| `true` | `NONE` | `n_vocab` floats per output token, as before | per token (`llama_get_embeddings_ith`) |
+| `true` | `MEAN`, `CLS`, `LAST`, `RANK` | **none: `llama_get_logits` returns `NULL`** | per sequence (`llama_get_embeddings_seq`) |
+
+- A pooled embeddings context no longer builds the LM head into its graph and reserves no
+  host logits buffer. In v5 every pooled encode still reserved and zeroed `n_vocab` floats
+  per token, which an embedding model without an LM head never even filled. For
+  EmbeddingGemma 2 (`n_vocab` 262144) that was 1 MiB per input token, 8 GiB at 8192
+  tokens, and the buffer never shrank until the context was freed. Read pooled
+  output with `llama_get_embeddings_seq` at the `llama_model_n_embd_out` width; nothing a
+  pooled context produces is read through `llama_get_logits*`.
+- Toggling `llama_set_embeddings` on a pooled context re-reserves its graph: `false` brings
+  the LM head and host logits back, and `true` removes them again.
+- Upstream keeps host logits for T5-architecture (encoder–decoder) models in every mode. No
+  release gate covers T5.
+- The release gates exercise `MEAN` pooling: both pooled smoke runs (`smoke`,
+  `embeddinggemma_smoke`) fail if `llama_get_logits` is not `NULL` after the encode, and
+  record `host_logits: false`. `CLS`, `LAST` and `RANK` follow the same upstream rule but no
+  gate checks their host logits. The correctness gate compares `MEAN` and `LAST`
+  embedding values and does not inspect logits.
+
+The pinned EmbeddingGemma 2 and legacy models have no LM head, so neither can show that
+logits survived where they are still computed. `scripts/logits-smoke.sh` therefore runs a
+generative control model pinned in `scripts/config.env` (`LOGITS_SMOKE_*`): karpathy's
+tinyllamas `stories260K`, in the GGUF that llama.cpp's own CI uses (`ggml-org/models-moved`
+revision `499bc8821c6b12b4e53c5bffcb21ec206f212d81`, SHA-256-checked; llama architecture,
+`n_vocab` 512, with an `output.weight` LM head). It decodes one prompt in each mode below and
+requires `llama_get_logits` to match:
+
+| `host_logits` key | Context | Host logits |
+| --- | --- | --- |
+| `generation` | `embeddings = false` | yes, `n_vocab` finite, non-constant values |
+| `embeddings_none` | `embeddings = true`, `NONE` (with per-token embeddings) | yes |
+| `embeddings_mean` | `embeddings = true`, `MEAN` (with a pooled embedding) | no (`NULL`) |
+| `embeddings_mean_set_off` | the `MEAN` context after `llama_set_embeddings(false)` | yes |
+| `embeddings_mean_set_on` | the same context after `llama_set_embeddings(true)` | no; the pooled embedding equals `embeddings_mean`'s |
+
+The last-token logits of the three modes that have them must agree within `1e-3`
+(`max_logit_delta`), so a mode cannot pass with logits from a different computation. The
+result is required as `build-info.json.logits_smoke`, and its `host_logits` map must equal
+this table. The control model is a test input only, not shipped, and says nothing about
+generation quality.
+
 ## EmbeddingGemma 2 text liveness gate (v5)
 
 `scripts/embeddinggemma-smoke.sh` fetches the exact Q8_0 text GGUF pinned in
@@ -227,7 +281,8 @@ buffer read would only check 512 elements and is no longer used.
 Packaging requires `RESULTS/embeddinggemma-smoke.json` with a passing result,
 matching model identity/hash and dimensions. It is merged into
 `build-info.json.embeddinggemma_smoke`, alongside (not replacing) the original
-`smoke`, `benchmark` and `correctness` records. `scripts/verify-provenance.sh
+`smoke`, `logits_smoke`, `benchmark` and `correctness` records. Since v6 it also records
+`host_logits: false`: the encode left no host logits (see below). `scripts/verify-provenance.sh
 --packaged` requires it, with the same pins, after packaging and again before
 publication. Both native CI variants run the new test before packaging; pull
 requests run the matrix without publishing.
@@ -304,12 +359,12 @@ is a known gap (`build-info.json.correctness.hardware_coverage`). A disabled-by-
 self-hosted N1 job exists in `release.yml` (`ENABLE_N1_CORRECTNESS=1`) to close it once a
 runner is provisioned.
 
-## Provenance (`build-info.json`, v5)
+## Provenance (`build-info.json`, v6)
 
 | Field | Meaning |
 | --- | --- |
-| `llama_cpp.tag` / `.tag_type` / `.commit` / `.describe` | The compiled engine: the requested tag, its Git object type (must equal the pinned `EXPECTED_LLAMA_CPP_TAG_TYPE`: `commit` for the lightweight `b11577`, `tag` for an annotated tag), the verified `HEAD`, and the `git describe --tags --exact-match` output. |
-| `llama_cpp.embedded_version` / `.embedded_commit` | `LLAMA_VERSION` / `LLAMA_COMMIT` from the generated `llama-version.h`; both are gated. The version must equal the pinned `EXPECTED_LLAMA_CPP_VERSION` (`0.6.0`), optionally with the `-dev` suffix llama.cpp gives tree builds (`b11577` reports `0.6.0-dev`). It is pinned separately because nightly tag numbers are not semantic versions. The commit must be a prefix (at least 7 hex digits) of `llama_cpp.commit`. |
+| `llama_cpp.tag` / `.tag_type` / `.commit` / `.describe` | The compiled engine: the requested tag, its Git object type (must equal the pinned `EXPECTED_LLAMA_CPP_TAG_TYPE`: `commit` for the lightweight `b11630`, `tag` for an annotated tag), the verified `HEAD`, and the `git describe --tags --exact-match` output. |
+| `llama_cpp.embedded_version` / `.embedded_commit` | `LLAMA_VERSION` / `LLAMA_COMMIT` from the generated `llama-version.h`; both are gated. The version must equal the pinned `EXPECTED_LLAMA_CPP_VERSION` (`0.6.0`), optionally with the `-dev` suffix llama.cpp gives tree builds (`b11630` reports `0.6.0-dev`). It is pinned separately because nightly tag numbers are not semantic versions. The commit must be a prefix (at least 7 hex digits) of `llama_cpp.commit`. |
 | `llama_cpp_rs.git_ref` / `.git_ref_type` / `.commit` | The build driver: the requested ref (a tag), its type, and the commit it resolved to. |
 | `llama_cpp_rs.vendored_llama_cpp_commit` / `.vendored_llama_cpp_overridden` | The crate's own llama.cpp gitlink. It is recorded but **not** compiled when `overridden` is `true`. |
 | `llama_cpp_sys_2.version` / `.default_features` / `.features` | The crate package version and its feature selection (`false` / `[]`). |
@@ -321,14 +376,16 @@ runner is provisioned.
 | `pgo.architecture` / `.cpu_baseline` | For a PGO build, the variant the profile was trained for (`null` when PGO is off). |
 | `pgo.use_flags` | For a PGO build, the flags added on top of `effective_arch_flags` (`-fprofile-use=…` and its warning flags; `null` when PGO is off). |
 | `runner` | Where the build ran: `kind` (`github-hosted` / `self-hosted` / `local`), `label`, `uarch`, `cpu_model`. |
-| `smoke` / `embeddinggemma_smoke` | The two smoke results: `passed`, `n_embd` (hidden width), `n_embd_out` (pooled output width: the number of elements read and checked), `n_tokens`, `l2_norm` and `model_sha256` (computed from the file tested). `embeddinggemma_smoke` also records `model_id`, and must match the `EMBEDDINGGEMMA_*` pins. The legacy `smoke` model is identified by its hash alone; `correctness.sh` requires it to equal the correctness reference GGUF. |
+| `smoke` / `embeddinggemma_smoke` | The two pooled smoke results: `passed`, `n_embd` (hidden width), `n_embd_out` (pooled output width: the number of elements read and checked), `n_tokens`, `l2_norm`, `host_logits` (`false`: `llama_get_logits` returned `NULL` after the pooled encode; required) and `model_sha256` (computed from the file tested). `embeddinggemma_smoke` also records `model_id`, and must match the `EMBEDDINGGEMMA_*` pins. The legacy `smoke` model is identified by its hash alone; `correctness.sh` requires it to equal the correctness reference GGUF. |
+| `logits_smoke` | The output-semantics control: `passed`, `n_vocab`, `n_tokens`, `host_logits` (one boolean per mode, which must equal the table in [Output semantics](#output-semantics-v6)), `max_logit_delta` (largest difference between the last-token logits of the modes that have them, at most `1e-3`), `model_id` and `model_sha256` (must match the `LOGITS_SMOKE_*` pins). |
 
 Release CI runs `scripts/verify-provenance.sh --packaged <file> <profile>` on each variant's
 `build-info.json` after packaging, and again in the release job before it publishes. It
 fails on any mismatch with `scripts/config.env`. On x86-64 that includes the v3 gate
 result, `effective_isa` and `disassembly.above_v3 == 0`. It also fails when `smoke`,
-`embeddinggemma_smoke`, `benchmark` or `correctness` is missing or has `passed != true`,
-which is the same check `scripts/package.sh` gates on.
+`embeddinggemma_smoke`, `logits_smoke`, `benchmark` or `correctness` is missing, has
+`passed != true` or does not match its pins, which is the same check `scripts/package.sh`
+gates on.
 
 ## Guarantees & non-guarantees
 
@@ -336,7 +393,9 @@ which is the same check `scripts/package.sh` gates on.
   (`aarch64`, or an x86-64-v3 capable `x86_64` host) from the pinned inputs
   (llama.cpp verified by commit and exact tag; see `build-info.json.llama_cpp`), passed the
   on-target smoke tests (real embeddings from the legacy model and the pinned EmbeddingGemma 2
-  text fixture; see `build-info.json.smoke` / `.embeddinggemma_smoke`), were within the
+  text fixture; see `build-info.json.smoke` / `.embeddinggemma_smoke`), showed the output
+  semantics below on both pooled models and the generative control
+  (`build-info.json.logits_smoke`), were within the
   benchmark regression threshold vs a from-source build (see `build-info.json.benchmark`),
   and passed the correctness gate above (`build-info.json.correctness.passed == true`).
   `scripts/package.sh` refuses to package without these results, and release CI re-checks

@@ -8,8 +8,8 @@
 # gate). Release CI runs this before publishing; it needs only bash + jq, so it can also be
 # pointed at a downloaded release's build-info.json from any machine.
 #
-# It then checks the release results (smoke, embeddinggemma_smoke, benchmark, correctness)
-# with the gate package.sh applies (lib.sh assert_release_results):
+# It then checks the release results (smoke, embeddinggemma_smoke, logits_smoke, benchmark,
+# correctness) with the gate package.sh applies (lib.sh assert_release_results):
 #   --packaged (default)  every result must be present and pass. Use it on anything
 #                         package.sh produced, including every downloaded release.
 #   --raw                 for fresh build.sh output, which has no results yet: none is
