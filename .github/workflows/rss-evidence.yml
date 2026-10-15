@@ -1,0 +1,124 @@
+name: rss-evidence-issue-14
+
+# Evidence only, for issue #14: peak RSS and encode time of one pooled EmbeddingGemma 2
+# encode with the published v0.1.159-2 archives (llama.cpp b11577) vs PR #15's build
+# (b11630), on BOTH native production architectures. This file lives only on the
+# evidence/issue-14-rss branch and is never merged. It builds no artifact and publishes
+# nothing; the archives it measures are verified by checksum (and, for the new build,
+# against this tree's scripts/config.env) before use.
+on:
+  push:
+    branches: ["evidence/issue-14-rss"]
+
+permissions:
+  contents: read
+  actions: read   # download PR #15's build artifacts
+
+jobs:
+  measure:
+    name: rss (${{ matrix.profile }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: aarch64-graviton2
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+          - profile: x86_64-v3
+            arch: x86_64
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Assert native ${{ matrix.arch }} runner
+        run: bash scripts/assert-native-runner.sh "${{ matrix.arch }}"
+
+      - name: Tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq time jq
+          if ! command -v rustup >/dev/null; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          nproc; free -g; lscpu | sed -n '1,20p'
+
+      - name: Fetch and verify old (v0.1.159-2) and new (PR #15) archives
+        run: |
+          set -euo pipefail
+          source evidence/rss-probe/inputs.env
+          source scripts/config.env
+          [[ "${TARGET_PROFILE}" == "${{ matrix.profile }}" ]]
+          v="${ARTIFACT_VARIANT}" t="static-llama-cpp-${OLD_RELEASE}-${ARTIFACT_VARIANT}.tar.gz"
+          mkdir -p ev/old-dl ev/old ev/new
+          gh release download "${OLD_RELEASE}" -R "${GITHUB_REPOSITORY}" -D ev/old-dl -p "${t}" -p "${t}.sha256"
+          ( cd ev/old-dl && sha256sum -c "${t}.sha256" )
+          want="OLD_SHA256_${v//-/_}"
+          echo "${!want}  ev/old-dl/${t}" | sha256sum -c -
+          tar xzf "ev/old-dl/${t}" -C ev/old
+          ( cd ev/old && sha256sum -c --quiet SHA256SUMS )
+          [[ "$(gh run view "${NEW_RUN_ID}" -R "${GITHUB_REPOSITORY}" --json headSha -q .headSha)" == "${NEW_HEAD_SHA}" ]]
+          gh run download "${NEW_RUN_ID}" -R "${GITHUB_REPOSITORY}" -n "static-llama-cpp-${v}" -D ev/new
+          ( cd ev/new && sha256sum -c --quiet SHA256SUMS )
+          bash scripts/verify-provenance.sh --packaged ev/new/build-info.json "${{ matrix.profile }}"
+          for d in old new; do
+            jq -r --arg d "${d}" '"\($d): llama.cpp \(.llama_cpp.tag)@\(.llama_cpp.commit), contract \(.artifact_contract_version), \(.target_profile)"' "ev/${d}/build-info.json"
+          done
+
+      - name: Compare bindings and headers (old vs new)
+        run: |
+          set -euo pipefail
+          # Recorded, not gated: a difference is evidence to read, and the RSS run still matters.
+          if cmp -s ev/old/bindings.rs ev/new/bindings.rs; then
+            echo "bindings.rs: byte-identical" | tee ev/abi.txt
+          else
+            { echo "bindings.rs: DIFFERS"; diff ev/old/bindings.rs ev/new/bindings.rs; } | tee ev/abi.txt || true
+          fi
+          echo "include/ diff:" | tee -a ev/abi.txt
+          diff -r ev/old/include ev/new/include | tee -a ev/abi.txt || true
+          for d in old new; do
+            for a in ev/${d}/lib/*.a; do
+              nm -g --defined-only "${a}" 2>/dev/null | awk '$2 ~ /[TDBRW]/ {print $3}'
+            done | sort -u > "ev/${d}-symbols.txt"
+          done
+          echo "C symbols added:"   | tee -a ev/abi.txt
+          comm -13 ev/old-symbols.txt ev/new-symbols.txt | grep -v '^_Z' | tee -a ev/abi.txt || true
+          echo "C symbols removed:" | tee -a ev/abi.txt
+          comm -23 ev/old-symbols.txt ev/new-symbols.txt | grep -v '^_Z' | tee -a ev/abi.txt || true
+
+      - name: Fetch EmbeddingGemma 2 (pinned)
+        run: |
+          set -euo pipefail
+          source scripts/config.env
+          LIB_TAG=rss-evidence
+          source scripts/lib.sh
+          fetch_pinned_model "${EMBEDDINGGEMMA_MODEL_URL}" "${EMBEDDINGGEMMA_MODEL_SHA256}" ev/embeddinggemma-2-Q8_0.gguf
+
+      - name: Measure (fresh process per run, /usr/bin/time -v)
+        run: |
+          set -euo pipefail
+          source evidence/rss-probe/inputs.env
+          for label in old new; do
+            bash evidence/rss-probe/measure.sh "${label}" "ev/${label}" ev/embeddinggemma-2-Q8_0.gguf ev/out "${REPS}" "${LENGTHS}"
+          done
+
+      - name: Summarize
+        run: python3 evidence/rss-probe/summarize.py ev/out "${{ matrix.profile }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rss-evidence-${{ matrix.profile }}
+          path: |
+            ev/out/*.jsonl
+            ev/out/*.f32
+            ev/out/summary.json
+            ev/out/probe-*.log
+            ev/abi.txt
+          if-no-files-found: warn

@@ -1,0 +1,14 @@
+[package]
+name = "rss-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Evidence-only harness for issue #14 (not part of the artifact or the release gates):
+# peak RSS and encode latency of one pooled EmbeddingGemma 2 encode, with LTEmbed's context
+# settings. Links whichever archive set STATIC_LLAMA_DIR names via the consumer build.rs.
+[[bin]]
+name = "rss-probe"
+path = "src/main.rs"
+
+[workspace]
