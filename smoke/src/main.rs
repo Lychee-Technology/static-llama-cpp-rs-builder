@@ -90,14 +90,17 @@ fn result_json(
 
 // The output modes SMOKE_MODE=logits runs, in order, and whether llama_get_logits must
 // return host logits in each (CONTRACT.md "Output semantics"; scripts/lib.sh
-// assert_release_results checks the recorded map). The last two toggle
-// llama_set_embeddings on the mean-pooled context: off must bring the LM head back.
-const LOGITS_MODES: [(&str, bool); 5] = [
+// assert_release_results checks the recorded map). The two set_* modes toggle
+// llama_set_embeddings on the mean-pooled context: off must bring the LM head back. LAST
+// (the legacy model's deployment pooling) and CLS must drop host logits like MEAN.
+const LOGITS_MODES: [(&str, bool); 7] = [
     ("generation", true),
     ("embeddings_none", true),
     ("embeddings_mean", false),
     ("embeddings_mean_set_off", true),
     ("embeddings_mean_set_on", false),
+    ("embeddings_last", false),
+    ("embeddings_cls", false),
 ];
 
 // LOGITS_MODES as the JSON object recorded under host_logits.
@@ -295,13 +298,8 @@ fn logits_smoke(
     model_id: Option<&str>,
     model_sha256: &str,
 ) -> String {
-    let (generation, embeddings_none, embeddings_mean, set_off, set_on) = (
-        LOGITS_MODES[0],
-        LOGITS_MODES[1],
-        LOGITS_MODES[2],
-        LOGITS_MODES[3],
-        LOGITS_MODES[4],
-    );
+    let [generation, embeddings_none, embeddings_mean, set_off, set_on, embeddings_last, embeddings_cls] =
+        LOGITS_MODES;
     unsafe {
         let vocab = llama::llama_model_get_vocab(model);
         let n_vocab = llama::llama_vocab_n_tokens(vocab);
@@ -381,6 +379,21 @@ fn logits_smoke(
             fail("re-enabling embeddings changed the mean-pooled embedding");
         }
         llama::llama_free(ctx);
+
+        // The other sequence poolings follow the same rule.
+        for ((mode, has_logits), pooling) in [
+            (embeddings_last, llama::LLAMA_POOLING_TYPE_LAST),
+            (embeddings_cls, llama::LLAMA_POOLING_TYPE_CLS),
+        ] {
+            let ctx = new_context(model, true, pooling);
+            decode_mode(ctx, mode, has_logits, &mut toks, n_vocab);
+            read_embedding(
+                llama::llama_get_embeddings_seq(ctx, 0),
+                n_embd_out,
+                &format!("llama_get_embeddings_seq(0) for {mode}"),
+            );
+            llama::llama_free(ctx);
+        }
 
         println!(
             "[smoke] PASS (logits): n_vocab={n_vocab}, tokens={}, max_logit_delta={max_delta:e}",
@@ -609,7 +622,9 @@ mod tests {
             without,
             [
                 &("embeddings_mean", false),
-                &("embeddings_mean_set_on", false)
+                &("embeddings_mean_set_on", false),
+                &("embeddings_last", false),
+                &("embeddings_cls", false)
             ]
         );
     }
@@ -626,7 +641,7 @@ mod tests {
     fn logits_result_records_modes() {
         assert_eq!(
             logits_result_json(512, 15, 2.5e-6, Some("karpathy/tinyllamas/stories260K"), SHA),
-            format!("{{\"passed\":true,\"n_vocab\":512,\"n_tokens\":15,\"host_logits\":{{\"generation\":true,\"embeddings_none\":true,\"embeddings_mean\":false,\"embeddings_mean_set_off\":true,\"embeddings_mean_set_on\":false}},\"max_logit_delta\":0.0000025,\"model_id\":\"karpathy/tinyllamas/stories260K\",\"model_sha256\":\"{SHA}\"}}\n")
+            format!("{{\"passed\":true,\"n_vocab\":512,\"n_tokens\":15,\"host_logits\":{{\"generation\":true,\"embeddings_none\":true,\"embeddings_mean\":false,\"embeddings_mean_set_off\":true,\"embeddings_mean_set_on\":false,\"embeddings_last\":false,\"embeddings_cls\":false}},\"max_logit_delta\":0.0000025,\"model_id\":\"karpathy/tinyllamas/stories260K\",\"model_sha256\":\"{SHA}\"}}\n")
         );
     }
 

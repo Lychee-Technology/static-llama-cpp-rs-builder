@@ -113,7 +113,9 @@ result_pin_cases=(
   '.logits_smoke.host_logits.generation=false|.logits_smoke.host_logits: {"generation":false'
   '.logits_smoke.host_logits.embeddings_mean=true|.logits_smoke.host_logits: {"generation":true,"embeddings_none":true,"embeddings_mean":true,'
   '.logits_smoke.host_logits.embeddings_mean_set_off=false|.logits_smoke.host_logits: {"generation":true,"embeddings_none":true,"embeddings_mean":false,"embeddings_mean_set_off":false,'
-  'del(.logits_smoke.host_logits.embeddings_mean_set_on)|.logits_smoke.host_logits: {"generation":true,"embeddings_none":true,"embeddings_mean":false,"embeddings_mean_set_off":true}, expected'
+  'del(.logits_smoke.host_logits.embeddings_mean_set_on)|.logits_smoke.host_logits: {"generation":true,"embeddings_none":true,"embeddings_mean":false,"embeddings_mean_set_off":true,"embeddings_last":false,"embeddings_cls":false}, expected'
+  '.logits_smoke.host_logits.embeddings_last=true|"embeddings_mean_set_on":false,"embeddings_last":true,"embeddings_cls":false}, expected'
+  '.logits_smoke.host_logits.embeddings_cls=true|"embeddings_last":false,"embeddings_cls":true}, expected'
   'del(.logits_smoke.host_logits)|.logits_smoke.host_logits: null'
 )
 

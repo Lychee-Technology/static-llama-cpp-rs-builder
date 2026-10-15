@@ -84,9 +84,9 @@ build image. CI gates the environment envelope (`EXPECTED_CLANG_MAJOR`, `MIN_GLI
    This is liveness/shape validation, not independent FP32 parity or multimodal support.
    Both pooled runs also require `llama_get_logits` to return `NULL` (contract v6: a pooled
    context reserves no host logits). `scripts/logits-smoke.sh` runs a pinned ~1 MB
-   generative model with an LM head (`stories260K`) through generation, per-token and
-   mean-pooled embeddings, and requires logits in exactly the modes
-   [CONTRACT.md](CONTRACT.md#output-semantics-v6) lists.
+   generative model with an LM head (`stories260K`) through generation, per-token
+   embeddings and `MEAN`/`LAST`/`CLS`-pooled embeddings, and requires logits in exactly the
+   modes [CONTRACT.md](CONTRACT.md#output-semantics-v6) lists.
 3. `scripts/correctness.sh` compares the tuned build against a generic reference build of
    the same revision, and also runs golden parity and self-consistency checks. Every
    comparison first requires the reference's label set to equal the rows of

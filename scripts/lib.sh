@@ -438,7 +438,7 @@ fetch_pinned_model() {
 # The output semantics of contract v6 (CONTRACT.md "Output semantics"): both pooled smoke
 # runs found no host logits, and the generative control found them exactly here. The modes
 # are the ones smoke/src/main.rs LOGITS_MODES runs.
-LOGITS_SMOKE_HOST_LOGITS='{"generation":true,"embeddings_none":true,"embeddings_mean":false,"embeddings_mean_set_off":true,"embeddings_mean_set_on":false}'
+LOGITS_SMOKE_HOST_LOGITS='{"generation":true,"embeddings_none":true,"embeddings_mean":false,"embeddings_mean_set_off":true,"embeddings_mean_set_on":false,"embeddings_last":false,"embeddings_cls":false}'
 assert_release_results() {
   local mode="$1" build_info="$2" problems
   [[ "${mode}" == packaged || "${mode}" == raw ]] \
