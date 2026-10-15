@@ -60,14 +60,32 @@ for type in tag commit; do
   echo modified > "${LLAMA_CPP_DIR}/source.txt"
   expect_failure 'dirty source checkout' 'llama.cpp checkout has local modifications' verify_llama_cpp_source
   echo original > "${LLAMA_CPP_DIR}/source.txt"
-done
 
-# The lightweight tag moves away from the otherwise correct HEAD.
-git -C "${LLAMA_CPP_DIR}" commit --allow-empty --quiet -m other
-other="$(git -C "${LLAMA_CPP_DIR}" rev-parse HEAD)"
-git -C "${LLAMA_CPP_DIR}" switch --quiet --detach "${EXPECTED_LLAMA_CPP_COMMIT}"
-git -C "${LLAMA_CPP_DIR}" update-ref "refs/tags/${LLAMA_CPP_TAG}" "${other}"
-expect_failure 'moved tag despite correct HEAD' "llama.cpp tag ${LLAMA_CPP_TAG} -> '${other}'" verify_llama_cpp_source
+  if [[ "${type}" == tag ]]; then
+    # The ref is the pinned name and peels to the right commit, but its tag object was
+    # created as another tag.
+    pinned_object="$(git -C "${LLAMA_CPP_DIR}" rev-parse "refs/tags/${LLAMA_CPP_TAG}")"
+    git -C "${LLAMA_CPP_DIR}" tag -a impostor -m impostor
+    git -C "${LLAMA_CPP_DIR}" update-ref "refs/tags/${LLAMA_CPP_TAG}" "$(git -C "${LLAMA_CPP_DIR}" rev-parse refs/tags/impostor)"
+    expect_failure 'annotated tag object naming another tag' \
+      "llama.cpp tag object names 'impostor', expected ${LLAMA_CPP_TAG}" verify_llama_cpp_source
+    git -C "${LLAMA_CPP_DIR}" update-ref "refs/tags/${LLAMA_CPP_TAG}" "${pinned_object}"
+    git -C "${LLAMA_CPP_DIR}" tag -d impostor >/dev/null
+    verify_llama_cpp_source
+  fi
+
+  # The tag moves away from the otherwise correct HEAD.
+  git -C "${LLAMA_CPP_DIR}" commit --allow-empty --quiet -m other
+  other="$(git -C "${LLAMA_CPP_DIR}" rev-parse HEAD)"
+  git -C "${LLAMA_CPP_DIR}" switch --quiet --detach "${EXPECTED_LLAMA_CPP_COMMIT}"
+  if [[ "${type}" == tag ]]; then
+    git -C "${LLAMA_CPP_DIR}" tag -f -a "${LLAMA_CPP_TAG}" -m moved "${other}" >/dev/null
+  else
+    git -C "${LLAMA_CPP_DIR}" update-ref "refs/tags/${LLAMA_CPP_TAG}" "${other}"
+  fi
+  expect_failure "moved ${type} tag despite correct HEAD" "llama.cpp tag ${LLAMA_CPP_TAG} -> '${other}'" \
+    verify_llama_cpp_source
+done
 
 header="${TMP}/llama-version.h"
 for version in "${EXPECTED_LLAMA_CPP_VERSION}" "${EXPECTED_LLAMA_CPP_VERSION}-dev"; do
@@ -123,6 +141,9 @@ result_pin_cases=(
 # The raw form mirrors build.sh output: null result placeholders, no embeddinggemma_smoke or
 # logits_smoke. The packaged form adds the five passing results package.sh merges.
 source "${ROOT}/scripts/config.env"
+# The Git object type the pin does not name, so the tag_type case below is a mismatch
+# whichever kind of tag config.env pins.
+if [[ "${EXPECTED_LLAMA_CPP_TAG_TYPE}" == tag ]]; then wrong_tag_type=commit; else wrong_tag_type=tag; fi
 for profile in ${SUPPORTED_TARGET_PROFILES}; do
   set_target_profile "${profile}"
   metadata="${TMP}/provenance-${profile}.json"
@@ -171,7 +192,7 @@ for profile in ${SUPPORTED_TARGET_PROFILES}; do
   for mode in packaged raw; do
     verify_provenance "--${mode}" "${packaged}" "${profile}"
     expect_verify_rejects "${mode}" "${profile}" "${packaged}" 'provenance mismatch: llama_cpp.tag_type' \
-      '.llama_cpp.tag_type="tag"'
+      ".llama_cpp.tag_type=\"${wrong_tag_type}\""
     expect_verify_rejects "${mode}" "${profile}" "${packaged}" 'provenance mismatch: llama_cpp.embedded_version' \
       '.llama_cpp.embedded_version="99.0.0"'
     expect_verify_rejects "${mode}" "${profile}" "${packaged}" 'provenance mismatch: llama_cpp.commit' \

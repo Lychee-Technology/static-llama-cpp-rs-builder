@@ -107,8 +107,10 @@ assert_no_build_env_overrides() {
 
 # --- Pinned sources -----------------------------------------------------------------
 
-# Called by preparation and offline regression tests. A nightly lightweight tag is
-# allowed only when config.env pins that exact object type and resolved commit.
+# Called by preparation and offline regression tests. A tag is accepted only as the
+# object type config.env pins (annotated "tag" for vX.Y.Z releases, lightweight "commit"
+# for nightly b* tags) and only at the pinned commit; an annotated tag object must also
+# name LLAMA_CPP_TAG.
 verify_llama_cpp_source() {
   local tagc tag_name dirty
   case "${EXPECTED_LLAMA_CPP_TAG_TYPE}" in
@@ -214,7 +216,7 @@ prepare_crate_source() {
 # in the checked-out build.rs. Must run on a PRISTINE build.rs (prepare_crate_source
 # restores it). Fails unless there was exactly one string-literal GGML_CPU_ARM_ARCH define,
 # it was the expected literal, and afterwards exactly one literal define carries CPU_MARCH.
-# (0.1.159 also has an Android-only `config.define("GGML_CPU_ARM_ARCH", &arch)` fed from
+# (0.1.160 also has an Android-only `config.define("GGML_CPU_ARM_ARCH", &arch)` fed from
 # the env var — not a literal, never reached on Linux, and the env var itself is refused by
 # assert_no_build_env_overrides.)
 GGML_ARM_ARCH_DEFAULT='config.define("GGML_CPU_ARM_ARCH", "armv8-a")'
