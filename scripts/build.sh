@@ -85,7 +85,7 @@ fi
 # the final (optimized) build is harvested/gated; the instrumented build is throwaway.
 PGO_USE_FLAGS=""            # appended to the shipped build's CFLAGS/CXXFLAGS when PGO=1
 PGO_PROFDATA=""            # set to the merged profile path when PGO=1 (recorded in build-info)
-export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
+export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(host_ncpu)}"
 if [[ "${PGO}" == "1" ]]; then
   [[ -n "${PGO_TRAIN_MODEL}" && -f "${PGO_TRAIN_MODEL}" ]] \
     || die "PGO=1 needs PGO_TRAIN_MODEL to point at a readable GGUF (got: '${PGO_TRAIN_MODEL}')"
@@ -140,7 +140,7 @@ if [[ "${PGO}" == "1" ]]; then
   # (bench.sh refuses a pgo.profdata whose meta names another arch/baseline).
   jq -n --arg arch "${TARGET_ARCH}" --arg triple "${TARGET_TRIPLE}" --arg prof "${TARGET_PROFILE}" \
         --arg baseline "${CPU_BASELINE}" --arg flags "${CFLAGS_TUNE}" \
-        --arg sha "$(sha256sum "${PGO_PROFDATA}" | awk '{print $1}')" \
+        --arg sha "$(sha256_file "${PGO_PROFDATA}")" \
         '{architecture: $arch, target_triple: $triple, target_profile: $prof,
           cpu_baseline: $baseline, training_flags: $flags, profdata_sha256: $sha}' >"${PGO_META}"
   PGO_USE_FLAGS="-fprofile-use=${PGO_PROFDATA} ${PGO_USE_WARN_FLAGS}"
@@ -259,7 +259,9 @@ while IFS= read -r line; do CMDS+=("${line}"); done < <(compile_commands_lines "
 X86_V3_ALLOWED_M='-m64|-mmmx|-msse|-msse2|-msse3|-mssse3|-msse4|-msse4\.1|-msse4\.2|-mpopcnt|-mcx16|-msahf|-mfxsr|-mxsave|-mavx|-mavx2|-mbmi|-mbmi2|-mf16c|-mfma|-mlzcnt|-mmovbe'
 ccxx_total=0; march_tus=0; isa_tus=0; conflicts=0; untuned=0; unmarched=0; badopt=0; nopgo=0
 conflict_examples=""; untuned_examples=""; unmarched_examples=""; badopt_examples=""; nopgo_examples=""
-declare -A ISA_SETS=()      # x86_64: distinct "compiler + ISA flags" sets -> example TU
+# x86_64: distinct "compiler + ISA flags" sets, one "<set><TAB><example TU>" line per TU,
+# deduplicated after the loop (a newline list: bash 3.2 has no associative arrays).
+ISA_SET_LINES=""
 for cmd in "${CMDS[@]}"; do
   # native anywhere is fatal.
   if grep -qE -- '-m(cpu|arch|tune)=native' <<<"${cmd}"; then
@@ -312,7 +314,7 @@ for cmd in "${CMDS[@]}"; do
       fi
       # Effective-ISA key: the compiler plus every -m / --target flag, in command order.
       isa_key="${cmd%% *} $(grep -oE -- '(^| )(-m[^ ]+|--target=[^ ]+)' <<<"${cmd}" | tr -d '\n' | sed 's/^ //')"
-      ISA_SETS["${isa_key}"]="${src}"
+      ISA_SET_LINES+="${isa_key}"$'\t'"${src}"$'\n'
     fi
     # Effective optimization = the LAST -O flag on the command line.
     last_opt="$(grep -oE -- '-O[0-9sgz]' <<<"${cmd}" | tail -n1 || true)"
@@ -325,6 +327,8 @@ for cmd in "${CMDS[@]}"; do
   fi
 done
 
+ISA_SETS="$(printf '%s' "${ISA_SET_LINES}" | awk -F'\t' '!seen[$1]++')"
+N_ISA_SETS="$(grep -c . <<<"${ISA_SETS}" || true)"
 log "Flag gate: ${#CMDS[@]} cmds, ${ccxx_total} C/C++ TUs, ${march_tus} with -march=${CPU_MARCH}, ${conflicts} conflicts, ${badopt} not -O3, ${nopgo} missing PGO profile"
 [[ "${conflicts}" -eq 0 ]] || die "GATE: ${conflicts} command(s) with native/flto/openmp/instrumentation/conflicting flags: ${conflict_examples}"
 [[ "${ccxx_total}" -gt 0 ]] || die "GATE: no C/C++ compile commands seen; cannot verify tuning"
@@ -346,19 +350,19 @@ else
   [[ "${unmarched}" -eq 0 ]] || die "GATE: ${unmarched} C/C++ TU(s) missing -march=${CPU_MARCH}: ${unmarched_examples}"
   [[ "${isa_tus}" -gt 0 ]] || die "GATE: no ggml CPU TU carries -DGGML_AVX2 — v3 kernels not compiled in"
   # Effective ISA per distinct compiler + flag set: exactly the v3 feature macros.
-  for k in "${!ISA_SETS[@]}"; do
+  while IFS=$'\t' read -r k ex; do
     read -r -a kv <<<"${k}"
     why="$(x86_isa_macro_check v3 "${kv[@]}")" \
-      || die "GATE: effective ISA is not x86-64-v3 for '${k}' (e.g. ${ISA_SETS[${k}]}): ${why}"
+      || die "GATE: effective ISA is not x86-64-v3 for '${k}' (e.g. ${ex}): ${why}"
     log "  effective ISA x86-64-v3: ${k}"
-  done
+  done <<<"${ISA_SETS}"
   ARCH_SUMMARY="$(jq -n --argjson cmds "${#CMDS[@]}" --argjson ccxx "${ccxx_total}" \
     --argjson march_tus "${march_tus}" --argjson isa "${isa_tus}" --argjson conflicts "${conflicts}" \
-    --argjson badopt "${badopt}" --argjson sets "${#ISA_SETS[@]}" --arg march "${CPU_MARCH}" \
+    --argjson badopt "${badopt}" --argjson sets "${N_ISA_SETS}" --arg march "${CPU_MARCH}" \
     '{compile_commands:$cmds, ccxx_tus:$ccxx, march:$march, mtune:null, march_tus:$march_tus,
       ggml_isa_tus:$isa, effective_isa_flag_sets:$sets, effective_isa:"x86-64-v3",
       conflicts:$conflicts, not_o3:$badopt}')"
-  log "GATE PASSED: ${ccxx_total} C/C++ TUs -O3 -march=${CPU_MARCH} (no -mtune), ${isa_tus} ggml ISA TUs, ${#ISA_SETS[@]} flag set(s) == x86-64-v3, no conflicts/flto/openmp"
+  log "GATE PASSED: ${ccxx_total} C/C++ TUs -O3 -march=${CPU_MARCH} (no -mtune), ${isa_tus} ggml ISA TUs, ${N_ISA_SETS} flag set(s) == x86-64-v3, no conflicts/flto/openmp"
 fi
 
 # --- 4. Harvest artifacts ---------------------------------------------------------
@@ -393,9 +397,9 @@ $(grep -E '^(violation|category|instructions)' <<<"${disasm_out}" | head -n 60)"
 fi
 
 # --- 5. Core build-info.json (smoke/benchmark filled in later by package.sh) ------
-BINDINGS_SHA="$(sha256sum "${DIST}/bindings.rs" | awk '{print $1}')"
+BINDINGS_SHA="$(sha256_file "${DIST}/bindings.rs")"
 LIBS_JSON="$(for lib in ${STATIC_LIBS}; do
-    sha="$(sha256sum "${DIST}/lib/${lib}" | awk '{print $1}')"
+    sha="$(sha256_file "${DIST}/lib/${lib}")"
     printf '{"name":"%s","sha256":"%s"}\n' "${lib}" "${sha}"
   done | jq -s '.')"
 LINK_LINE="$(for lib in ${STATIC_LIBS}; do printf -- '-l%s ' "${lib#lib}"; done \
@@ -445,7 +449,7 @@ jq -n \
   --arg pgo_model     "$( [[ -n "${PGO_PROFDATA}" ]] && basename "${PGO_TRAIN_MODEL}" || echo "" )" \
   --arg pgo_iters     "$( [[ "${PGO}" == "1" ]] && echo "${PGO_TRAIN_ITERS}" || echo "" )" \
   --arg pgo_flags     "${PGO_USE_FLAGS}" \
-  --arg pgo_sha       "$( [[ -f "${PGO_PROFDATA:-/nonexistent}" ]] && sha256sum "${PGO_PROFDATA}" | awk '{print $1}' || echo "" )" \
+  --arg pgo_sha       "$( [[ -f "${PGO_PROFDATA:-/nonexistent}" ]] && sha256_file "${PGO_PROFDATA}" || echo "" )" \
   --argjson arch      "${ARCH_SUMMARY}" \
   --argjson libs      "${LIBS_JSON}" \
   '{

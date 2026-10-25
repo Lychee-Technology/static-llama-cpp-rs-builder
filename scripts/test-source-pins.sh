@@ -27,6 +27,41 @@ expect_failure() {
   echo "PASS: rejects ${label}"
 }
 
+# --- Portable checksums and archive harvesting ---------------------------------------
+: >"${TMP}/empty"
+[[ "$(sha256_file "${TMP}/empty")" == e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ]] \
+  || { echo "FAIL: sha256_file of an empty file" >&2; exit 1; }
+echo "PASS: sha256_file"
+# A malformed pin used to verify anything under macOS's sha256sum -c; it fails before any
+# download.
+for bad_pin in "" "0000" "${EMBEDDINGGEMMA_MODEL_SHA256}x" "$(tr a-f A-F <<<"${EMBEDDINGGEMMA_MODEL_SHA256}")"; do
+  expect_failure "malformed pinned SHA-256 '${bad_pin}'" 'is not 64 lowercase hex digits' \
+    fetch_pinned_model "https://example.invalid/model.gguf" "${bad_pin}" "${TMP}/model.gguf"
+done
+cp "${TMP}/empty" "${TMP}/cached.gguf"
+fetch_pinned_model "https://example.invalid/never-fetched.gguf" \
+  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 "${TMP}/cached.gguf"
+echo "PASS: fetch_pinned_model reuses a verified copy without downloading"
+# harvest_sys_outputs: the installed archive set must equal STATIC_LIBS exactly.
+stage_out_dir() {
+  local lib
+  rm -rf "${TMP}/out" "${TMP}/harvest"; mkdir -p "${TMP}/out/lib"
+  for lib in ${STATIC_LIBS}; do : >"${TMP}/out/lib/${lib}"; done
+  printf 'extern "C" {\n    pub fn llama_encode(ctx: *mut llama_context) -> i32;\n}\n' >"${TMP}/out/bindings.rs"
+}
+stage_out_dir
+harvest_sys_outputs "${TMP}/out" "${TMP}/harvest"
+for lib in ${STATIC_LIBS}; do
+  [[ -f "${TMP}/harvest/lib/${lib}" ]] || { echo "FAIL: harvest did not copy ${lib}" >&2; exit 1; }
+done
+echo "PASS: harvests exactly STATIC_LIBS + bindings.rs"
+stage_out_dir; rm "${TMP}/out/lib/libggml-cpu.a"
+expect_failure 'a missing installed archive' 'installed archive set differs from STATIC_LIBS' \
+  harvest_sys_outputs "${TMP}/out" "${TMP}/harvest"
+stage_out_dir; : >"${TMP}/out/lib/libggml-metal.a"
+expect_failure 'an extra installed archive (e.g. a Metal backend)' 'installed archive set differs from STATIC_LIBS' \
+  harvest_sys_outputs "${TMP}/out" "${TMP}/harvest"
+
 for type in tag commit; do
   LLAMA_CPP_DIR="${TMP}/${type}"
   git init --quiet "${LLAMA_CPP_DIR}"

@@ -84,6 +84,29 @@ assert_native_host() {
   fi
 }
 
+# --- Portable host utilities ----------------------------------------------------------
+# The build scripts also run on macOS (bash 3.2, BSD userland), where `nproc`,
+# `find -printf`, glibc and /proc are absent.
+
+# host_ncpu: number of CPUs to build with (Linux: nproc, which honours the CPU affinity).
+host_ncpu() {
+  case "$(uname -s)" in
+    Darwin) sysctl -n hw.logicalcpu ;;
+    *)      nproc ;;
+  esac
+}
+
+# sha256_file FILE: print FILE's SHA-256 (64 lowercase hex). sha256sum, or macOS's
+# `shasum -a 256` where there is none; fails unless a digest came out.
+sha256_file() {
+  local out
+  if command -v sha256sum >/dev/null 2>&1; then out="$(sha256sum "$1")"
+  else out="$(shasum -a 256 "$1")"; fi || return 1
+  out="${out%% *}"
+  [[ "${out}" =~ ^[0-9a-f]{64}$ ]] || { echo "sha256_file: no SHA-256 digest for $1" >&2; return 1; }
+  printf '%s\n' "${out}"
+}
+
 # --- Build-input hygiene -------------------------------------------------------------
 # llama-cpp-sys-2's build.rs forwards EVERY GGML_* and CMAKE_* env var as a CMake cache
 # entry, reads LLAMA_LIB_PROFILE / LLAMA_BUILD_SHARED_LIBS / LLAMA_STATIC_CRT, and turns a
@@ -297,7 +320,7 @@ harvest_sys_outputs() {
   [[ -n "${out}" && -d "${out}" ]] || _lib_die "harvest: OUT_DIR '${out}' is not a directory"
   for d in "${out}/lib" "${out}/lib64"; do [[ -d "${d}" ]] && libdirs+=("${d}"); done
   [[ "${#libdirs[@]}" -gt 0 ]] || _lib_die "no install lib dir (lib/ or lib64/) under ${out}"
-  installed="$(find "${libdirs[@]}" -maxdepth 1 -name '*.a' -printf '%f\n' | sort)"
+  installed="$(find "${libdirs[@]}" -maxdepth 1 -name '*.a' | sed 's|.*/||' | sort)"
   expected="$(tr ' ' '\n' <<<"${STATIC_LIBS}" | sed '/^$/d' | sort)"
   [[ "${installed}" == "${expected}" ]] \
     || _lib_die "installed archive set differs from STATIC_LIBS:
@@ -411,17 +434,22 @@ x86_disasm_scan() {
 # --- Pinned test models -----------------------------------------------------------------
 # fetch_pinned_model URL SHA256 DEST: make DEST the file whose SHA-256 is SHA256, reusing a
 # verified copy or downloading URL. A download that does not verify is never moved into
-# place, so DEST only ever holds the pinned bytes.
+# place, so DEST only ever holds the pinned bytes. The digests are compared here rather
+# than with `sha256sum -c`: macOS's sha256sum -c exits 0 on a malformed or empty checksum
+# line, so a mistyped pin would have verified any file.
 fetch_pinned_model() {
-  local url="$1" sha="$2" dest="$3"
+  local url="$1" sha="$2" dest="$3" got
+  [[ "${sha}" =~ ^[0-9a-f]{64}$ ]] \
+    || _lib_die "pinned SHA-256 for ${url} is not 64 lowercase hex digits: '${sha}'"
   mkdir -p "$(dirname "${dest}")"
-  if [[ -f "${dest}" ]] && echo "${sha}  ${dest}" | sha256sum -c --status -; then
+  if [[ -f "${dest}" ]] && [[ "$(sha256_file "${dest}" || true)" == "${sha}" ]]; then
     return 0
   fi
   _lib_log "fetching ${url}"
   curl -fSL --retry 3 "${url}" -o "${dest}.download"
-  echo "${sha}  ${dest}.download" | sha256sum -c - >&2 \
-    || _lib_die "${url} does not match the pinned SHA-256 ${sha}"
+  got="$(sha256_file "${dest}.download")" || _lib_die "cannot hash ${dest}.download"
+  [[ "${got}" == "${sha}" ]] \
+    || _lib_die "${url} does not match the pinned SHA-256 ${sha} (got ${got})"
   mv "${dest}.download" "${dest}"
 }
 
