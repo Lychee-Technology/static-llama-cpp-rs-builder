@@ -15,12 +15,15 @@ config.env
    |
    +--> lib.sh  (sourced after config.env)
           +--> build.sh
-          +--> correctness.sh
-          +--> bench.sh
+          +--> correctness.sh           (assert_release_profile)
+          +--> bench.sh                 (assert_release_profile)
           +--> embeddinggemma-smoke.sh  (fetch_pinned_model)
           +--> logits-smoke.sh          (fetch_pinned_model)
-          +--> package.sh               (assert_release_results)
-          +--> verify-provenance.sh     (assert_release_results)
+          +--> ../smoke/fixtures/fetch-model.sh  (fetch_pinned_model)
+          +--> package.sh               (assert_release_profile, assert_release_results)
+          +--> verify-provenance.sh     (assert_release_profile, assert_release_results)
+          +--> test-source-pins.sh      (offline; every platform)
+          +--> test-macos-gates.sh      (macOS gates on synthetic Mach-O; Apple Silicon only)
 
 check-x86-64-v3.sh  (compiles and runs x86-64-v3-probe.c)
    |
@@ -53,6 +56,14 @@ Do not duplicate these values into other scripts when they can be sourced.
 Target profiles must remain explicit and fixed. They must not be selected from host CPU
 features.
 
+`host_target_profile` maps the host OS and architecture (`uname -s`, `uname -m`) to a
+profile. An unknown pair selects no profile, and the build then refuses the host.
+`SUPPORTED_TARGET_PROFILES` lists the release variants; `BUILD_ONLY_TARGET_PROFILES` lists
+profiles that build and are gated but are never released (`assert_release_profile`).
+Every profile sets every profile variable, including `TARGET_OS`, `NATIVE_ARCH`,
+`SYSTEM_LINK_LIBS` and the macOS-only ones (empty on Linux), so that no profile inherits a
+value from another.
+
 ## Native-host validation
 
 Production builds must remain native.
@@ -65,6 +76,11 @@ An x86 host below x86-64-v3 must be rejected rather than served a lower baseline
 `check-x86-64-v3.sh` is that gate: `lib.sh` runs it inside the container and
 `assert-native-runner.sh` runs it on the CI runner before the image is built. Keep it
 fail-closed and keep both call sites.
+
+On macOS, `assert_native_host` requires `Darwin`/`arm64`, `hw.optional.arm64` = 1 and
+`sysctl.proc_translated` = 0 (not Rosetta 2), and a compiler whose `-dumpmachine` is
+`arm64-apple-darwin*`. `macos_host_cpu_check` then requires the apple-m1 `hw.optional`
+features. Keep all of them.
 
 ## `lib.sh`
 
@@ -115,6 +131,31 @@ Do not enable AVX-512, AMX, AVX-VNNI, or another above-v3 extension.
 
 Keep the effective-ISA and disassembly gates. Seeing `-march=x86-64-v3` on the command
 line alone is insufficient proof.
+
+### Apple Silicon macOS (build-only)
+
+The profile pins `-mcpu=apple-m1`, not `-march`. With Apple clang, `-march=<arch>` changes
+only the frontend's feature macros: the backend still gets `-target-cpu apple-m1` (or the
+host default), so ggml's compile-time feature selection and the generated code can
+disagree. `-mcpu=apple-m1` makes both match. It is a fixed baseline, not autodetection.
+Never use `-mcpu=native` or a newer Apple CPU.
+
+The profile is CPU-only: `GGML_BACKEND_DEFINES` turns off Metal and Accelerate; the
+crate already forces BLAS off. A backend or framework dependency must not come back
+without a deliberate profile change.
+
+Keep the macOS gates in `lib.sh` and their `build.sh` call sites:
+- `apple_m1_isa_check`: frontend macros and backend `-target-cpu`/features per flag set;
+- `macos_objects_check`: thin arm64, macOS platform, pinned `minos`, recorded SDK, and no
+  weak-undefined symbol (cc-rs compiles with `-w`, which hides
+  `-Wunguarded-availability`);
+- `archive_order_check`: ld64 does not enforce archive order, so check it directly;
+- `macos_link_check`: link the archives with exactly `SYSTEM_LINK_LIBS` (each required),
+  allow only `libSystem` plus those libraries at run time, and require the CPU backend
+  only.
+
+`scripts/test-macos-gates.sh` holds a passing and a failing case for each of them. Extend
+it together with the gate.
 
 ## Source pins
 
@@ -249,6 +290,16 @@ Avoid broad `|| true`; constrain expected failure cases explicitly.
 
 Use atomic replacement for important generated metadata where partial writes could be
 mistaken for valid output.
+
+Scripts that run on macOS (`config.env`, `lib.sh`, `build.sh`, `verify-provenance.sh`,
+the smoke scripts and the test scripts) must work with the system `/bin/bash` 3.2 and BSD
+userland:
+- no `declare -A`, `mapfile`/`readarray`, `${var,,}` or `local -n`;
+- expand a possibly empty array under `set -u` as `${a[@]+"${a[@]}"}`;
+- no GNU-only options such as `find -printf`, `sed -i` without a suffix argument,
+  `stat -c` or `readlink -f`;
+- use `sha256_file` rather than `sha256sum` (macOS `sha256sum -c` passes malformed or empty
+  input), and `host_ncpu` rather than `nproc`.
 
 ## Validation
 

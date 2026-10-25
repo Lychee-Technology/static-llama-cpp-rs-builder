@@ -47,6 +47,10 @@ Do not introduce cross-compilation or CPU-emulation fallbacks.
 This project does not support producing ARM artifacts from x86 hosts or x86 artifacts from
 ARM hosts.
 
+The same chain holds on macOS: an `arm64` Apple Silicon host, Apple clang targeting
+`arm64-apple-macosx`, the `aarch64-apple-darwin` Rust host and arm64 Mach-O archives.
+Rosetta 2 is CPU emulation.
+
 If the current environment cannot perform a required native build, report that limitation
 instead of silently changing the build strategy.
 
@@ -62,6 +66,16 @@ x86_64-v3
 ```
 
 Do not add a generic or lower-ISA production fallback merely to support an incapable host.
+
+`scripts/config.env` also defines one build-only profile, `aarch64-apple-darwin` (native
+Apple Silicon macOS, CPU-only, fixed `-mcpu=apple-m1`). It is not a production variant. Its
+`build-info.json` records no artifact contract version, and the release steps
+(`package.sh`, `correctness.sh`, `bench.sh`, `verify-provenance.sh --packaged`) refuse
+it. Keep it out of `SUPPORTED_TARGET_PROFILES` and the release workflow, except as the
+deliberate release integration of issue #22 with its contract bump.
+
+Profiles are selected from the host OS and architecture together, never from the
+architecture alone: an `arm64` Mac is not a Graviton2 host.
 
 Production code generation must not depend on the current host CPU.
 
@@ -189,6 +203,9 @@ Release-affecting or architecture-sensitive changes must ultimately pass the nat
 matrix for both production variants.
 
 A local machine validates only its own native architecture.
+
+On an Apple Silicon Mac, also run `bash scripts/test-macos-gates.sh`. The scripts that run
+there use the system Bash 3.2 and BSD tools; see `scripts/AGENTS.md`.
 
 If complete validation is unavailable, state exactly what was run and what remains
 unverified. Never claim an architecture was tested when it was not.

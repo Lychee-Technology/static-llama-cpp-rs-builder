@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Offline regression tests for exact source/tag/version checks, provenance verification
-# (raw and packaged modes) and the release-results gate that package.sh and
-# verify-provenance.sh share. Each negative case starts from a baseline that passes,
-# changes one input, and must fail with the diagnostic of the check it targets.
+# Offline regression tests for exact source/tag/version checks, target profile selection,
+# provenance verification (raw and packaged modes, including the build-only macOS profile),
+# the release-results gate that package.sh and verify-provenance.sh share, archive
+# harvesting and pinned-model checksums. Each negative case starts from a baseline that
+# passes, changes one input, and must fail with the diagnostic of the check it targets.
+# Runs on Linux and macOS (bash 3.2); scripts/test-macos-gates.sh covers the Mach-O gates.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/config.env"
@@ -26,6 +28,88 @@ expect_failure() {
   fi
   echo "PASS: rejects ${label}"
 }
+
+# --- Target profiles ------------------------------------------------------------------
+# Selected by OS AND architecture: an arm64 Mac used to be taken for a Graviton2 host.
+for case in Linux/aarch64=aarch64-graviton2 Linux/arm64=aarch64-graviton2 Linux/x86_64=x86_64-v3 \
+            Linux/amd64=x86_64-v3 Darwin/arm64=aarch64-apple-darwin Darwin/x86_64= Darwin/i386= \
+            FreeBSD/aarch64= FreeBSD/amd64=; do
+  host="${case%%=*}" want="${case#*=}"
+  got="$(host_target_profile "${host%/*}" "${host#*/}")"
+  [[ "${got}" == "${want}" ]] \
+    || { echo "FAIL: host ${host} selects profile '${got}', expected '${want:-none}'" >&2; exit 1; }
+done
+echo "PASS: selects the target profile by OS and architecture"
+# Every profile sets every variable, with fixed, host-independent flags.
+profile_vars="TARGET_PROFILE TARGET_OS TARGET_ARCH NATIVE_ARCH TARGET_TRIPLE CPU_BASELINE CPU_MARCH CPU_MCPU CPU_MTUNE CPU_PROFILE CFLAGS_TUNE GGML_ISA_DEFINES GGML_BACKEND_DEFINES MACOS_DEPLOYMENT_TARGET SYSTEM_LINK_LIBS ARTIFACT_VARIANT GENERIC_REF_MARCH GENERIC_REF_GGML_DEFINES"
+for profile in ${SUPPORTED_TARGET_PROFILES} ${BUILD_ONLY_TARGET_PROFILES}; do
+  for v in ${profile_vars}; do unset "${v}"; done
+  set_target_profile "${profile}"
+  for v in ${profile_vars}; do
+    [[ -n "${!v+set}" ]] || { echo "FAIL: profile ${profile} does not set ${v}" >&2; exit 1; }
+  done
+  [[ "${TARGET_PROFILE}" == "${profile}" && "${TARGET_TRIPLE%%-*}" == "${TARGET_ARCH}" ]] \
+    || { echo "FAIL: profile ${profile} sets TARGET_PROFILE=${TARGET_PROFILE} TARGET_TRIPLE=${TARGET_TRIPLE}" >&2; exit 1; }
+  [[ "${CFLAGS_TUNE} ${GGML_ISA_DEFINES} ${GGML_BACKEND_DEFINES}" != *native* ]] \
+    || { echo "FAIL: profile ${profile} has a host-derived (native) flag: ${CFLAGS_TUNE}" >&2; exit 1; }
+done
+case " ${SUPPORTED_TARGET_PROFILES} " in
+  *" aarch64-apple-darwin "*) echo "FAIL: the build-only profile is listed as a release variant" >&2; exit 1 ;;
+esac
+set_target_profile aarch64-apple-darwin
+[[ "${TARGET_OS}/${NATIVE_ARCH}/${TARGET_TRIPLE}" == macos/arm64/aarch64-apple-darwin \
+   && "${CFLAGS_TUNE}" == "-O3 -mcpu=apple-m1" && -z "${CPU_MARCH}${CPU_MTUNE}" \
+   && "${GGML_BACKEND_DEFINES}" == "GGML_METAL=OFF GGML_ACCELERATE=OFF" \
+   && "${MACOS_DEPLOYMENT_TARGET}" == 11.0 && "${SYSTEM_LINK_LIBS}" == "c++" ]] \
+  || { echo "FAIL: aarch64-apple-darwin profile drifted: ${CFLAGS_TUNE} / ${GGML_BACKEND_DEFINES} / ${MACOS_DEPLOYMENT_TARGET} / ${SYSTEM_LINK_LIBS}" >&2; exit 1; }
+for profile in aarch64-graviton2 x86_64-v3; do
+  set_target_profile "${profile}"
+  [[ "${TARGET_OS}" == linux && "${NATIVE_ARCH}" == "${TARGET_ARCH}" && -z "${CPU_MCPU}${GGML_BACKEND_DEFINES}${MACOS_DEPLOYMENT_TARGET}" \
+     && "${SYSTEM_LINK_LIBS}" == "stdc++ pthread m dl" ]] \
+    || { echo "FAIL: Linux profile ${profile} changed: os=${TARGET_OS} mcpu=${CPU_MCPU} libs=${SYSTEM_LINK_LIBS}" >&2; exit 1; }
+done
+echo "PASS: every profile is complete and fixed; Linux profiles unchanged; macOS is build-only, -mcpu=apple-m1, CPU-only"
+for profile in ${SUPPORTED_TARGET_PROFILES}; do assert_release_profile "${profile}"; done
+expect_failure 'the build-only profile as a release profile' \
+  'target profile aarch64-apple-darwin is build-only, not a release variant' assert_release_profile aarch64-apple-darwin
+expect_failure 'an unknown release profile' "'bogus' is not a release target profile" assert_release_profile bogus
+expect_failure 'an unknown target profile' "unsupported target profile 'bogus'" set_target_profile bogus
+
+# --- Portable checksums and archive harvesting ---------------------------------------
+: >"${TMP}/empty"
+[[ "$(sha256_file "${TMP}/empty")" == e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ]] \
+  || { echo "FAIL: sha256_file of an empty file" >&2; exit 1; }
+echo "PASS: sha256_file"
+# A malformed pin used to verify anything under macOS's sha256sum -c; it fails before any
+# download.
+for bad_pin in "" "0000" "${EMBEDDINGGEMMA_MODEL_SHA256}x" "$(tr a-f A-F <<<"${EMBEDDINGGEMMA_MODEL_SHA256}")"; do
+  expect_failure "malformed pinned SHA-256 '${bad_pin}'" 'is not 64 lowercase hex digits' \
+    fetch_pinned_model "https://example.invalid/model.gguf" "${bad_pin}" "${TMP}/model.gguf"
+done
+cp "${TMP}/empty" "${TMP}/cached.gguf"
+fetch_pinned_model "https://example.invalid/never-fetched.gguf" \
+  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 "${TMP}/cached.gguf"
+echo "PASS: fetch_pinned_model reuses a verified copy without downloading"
+# harvest_sys_outputs: the installed archive set must equal STATIC_LIBS exactly.
+stage_out_dir() {
+  local lib
+  rm -rf "${TMP}/out" "${TMP}/harvest"; mkdir -p "${TMP}/out/lib"
+  for lib in ${STATIC_LIBS}; do : >"${TMP}/out/lib/${lib}"; done
+  printf 'extern "C" {\n    pub fn llama_encode(ctx: *mut llama_context) -> i32;\n}\n' >"${TMP}/out/bindings.rs"
+}
+stage_out_dir
+harvest_sys_outputs "${TMP}/out" "${TMP}/harvest"
+for lib in ${STATIC_LIBS}; do
+  [[ -f "${TMP}/harvest/lib/${lib}" ]] || { echo "FAIL: harvest did not copy ${lib}" >&2; exit 1; }
+done
+echo "PASS: harvests exactly STATIC_LIBS + bindings.rs"
+stage_out_dir; rm "${TMP}/out/lib/libggml-cpu.a"
+expect_failure 'a missing installed archive' 'installed archive set differs from STATIC_LIBS' \
+  harvest_sys_outputs "${TMP}/out" "${TMP}/harvest"
+stage_out_dir; : >"${TMP}/out/lib/libggml-metal.a"
+expect_failure 'an extra installed archive (e.g. a Metal backend)' 'installed archive set differs from STATIC_LIBS' \
+  harvest_sys_outputs "${TMP}/out" "${TMP}/harvest"
+source "${ROOT}/scripts/config.env"
 
 for type in tag commit; do
   LLAMA_CPP_DIR="${TMP}/${type}"
@@ -199,6 +283,10 @@ for profile in ${SUPPORTED_TARGET_PROFILES}; do
       '.llama_cpp.commit="wrong"'
     expect_verify_rejects "${mode}" "${profile}" "${packaged}" 'provenance mismatch: host.native_build' \
       '.host.native_build=false'
+    expect_verify_rejects "${mode}" "${profile}" "${packaged}" 'provenance mismatch: build_only' \
+      '.build_only=true'
+    expect_verify_rejects "${mode}" "${profile}" "${packaged}" 'provenance mismatch: build_only' \
+      '.build_only=false'
   done
 
   # Packaged mode requires every result, passing; raw mode still rejects a failed one.
@@ -223,6 +311,86 @@ for profile in ${SUPPORTED_TARGET_PROFILES}; do
     done
   done
 done
+
+# The build-only macOS profile: raw build.sh metadata of the shape build.sh writes on macOS,
+# from the canonical pins. It verifies in --raw mode only, never as a release.
+set_target_profile aarch64-apple-darwin
+darwin="${TMP}/provenance-aarch64-apple-darwin.json"
+jq --arg profile "${TARGET_PROFILE}" --arg triple "${TARGET_TRIPLE}" --arg arch "${TARGET_ARCH}" \
+   --arg native "${NATIVE_ARCH}" --arg baseline "${CPU_BASELINE}" --arg cpu "${CPU_PROFILE}" \
+   --arg flags "${CFLAGS_TUNE}" --arg mcpu "${CPU_MCPU}" --arg min "${MACOS_DEPLOYMENT_TARGET}" \
+   '.artifact_contract_version = null
+    | .target_profile = $profile | .architecture = $arch | .target_triple = $triple
+    | .cpu_baseline = $baseline | .cpu_profile = $cpu | .effective_arch_flags = $flags
+    | .arch_flag_summary = {mcpu: $mcpu, march: null, mtune: null, conflicts: 0,
+                            macos_version_min: $min, effective_isa: $baseline,
+                            backend_target_cpus: ["apple-a14"],
+                            objects: {archives: 4, objects: 72, arch: $native, platform: "macos",
+                                      minos: $min, sdk: "26.2", weak_undefined: 0}}
+    | .build_env = {os: "macOS 15.8.1 (24H32)", cc: "Apple clang version 17.0.0", native_build: true,
+                    host_arch: $native}
+    | .host = {native_build: true, architecture: $native,
+               cpu_capability: {baseline: $baseline, result: "PASS", rosetta: false}}
+    | .runner = {kind: "local", label: null, uarch: null, cpu_model: "Apple M1"}
+    | .link_line = "-lllama -lggml -lggml-cpu -lggml-base -lc++"
+    | .build_only = true | .target_os = "macos" | .macos_deployment_target = $min
+    | .link_check = {passed: true, system_libs: ["c++"], each_system_lib_required: true,
+                     runtime_dylibs: ["/usr/lib/libc++.1.dylib", "/usr/lib/libSystem.B.dylib"],
+                     frameworks: [], minos: $min, backends: ["CPU"],
+                     archive_order_back_references: 0}' \
+   "${TMP}/provenance-x86_64-v3.json" > "${darwin}"
+verify_provenance --raw "${darwin}" aarch64-apple-darwin
+echo "PASS: verifies build-only aarch64-apple-darwin metadata in raw mode"
+expect_failure 'aarch64-apple-darwin in the default (packaged) mode' \
+  'target profile aarch64-apple-darwin is build-only, not a release variant' \
+  verify_provenance "${darwin}" aarch64-apple-darwin
+expect_failure 'aarch64-apple-darwin metadata checked as a Graviton2 release' \
+  'provenance mismatch: artifact_contract_version' verify_provenance --raw "${darwin}" aarch64-graviton2
+# "<jq alteration>|<diagnostic>": one broken property each.
+darwin_cases=(
+  ".artifact_contract_version=\"${ARTIFACT_CONTRACT_VERSION}\"|provenance mismatch: artifact_contract_version"
+  '.target_profile="aarch64-graviton2"|provenance mismatch: target_profile'
+  '.target_triple="aarch64-unknown-linux-gnu"|provenance mismatch: target_triple'
+  '.cpu_baseline="armv8.2-a+fp16+dotprod+rcpc"|provenance mismatch: cpu_baseline'
+  '.effective_arch_flags="-O3 -march=armv8.2-a+fp16+dotprod+rcpc -mtune=neoverse-n1"|provenance mismatch: effective_arch_flags'
+  '.arch_flag_summary.march="armv8.2-a"|provenance mismatch: arch_flag_summary.march'
+  '.arch_flag_summary.mtune="apple-m2"|provenance mismatch: arch_flag_summary.mtune'
+  '.arch_flag_summary.mcpu="apple-m2"|provenance mismatch: arch_flag_summary.mcpu'
+  '.arch_flag_summary.effective_isa="apple-m2"|provenance mismatch: arch_flag_summary.effective_isa'
+  '.arch_flag_summary.backend_target_cpus=["apple-a15"]|provenance mismatch: arch_flag_summary.backend_target_cpus'
+  '.arch_flag_summary.conflicts=1|provenance mismatch: arch_flag_summary.conflicts'
+  '.arch_flag_summary.macos_version_min="14.0"|provenance mismatch: arch_flag_summary.macos_version_min'
+  '.arch_flag_summary.objects.minos="14.0"|provenance mismatch: arch_flag_summary.objects'
+  '.arch_flag_summary.objects.weak_undefined=3|provenance mismatch: arch_flag_summary.objects'
+  '.arch_flag_summary.objects.arch="x86_64"|provenance mismatch: arch_flag_summary.objects'
+  '.macos_deployment_target="14.0"|provenance mismatch: macos_deployment_target'
+  'del(.macos_deployment_target)|provenance mismatch: macos_deployment_target'
+  'del(.build_only)|provenance mismatch: build_only'
+  '.target_os="linux"|provenance mismatch: target_os'
+  '.build_env.host_arch="x86_64"|provenance mismatch: build_env.host_arch'
+  '.host.architecture="aarch64"|provenance mismatch: host.architecture'
+  '.host.cpu_capability.result="FAIL"|provenance mismatch: host.cpu_capability (apple-m1 gate PASS)'
+  '.host.cpu_capability.rosetta=true|provenance mismatch: host.cpu_capability (apple-m1 gate PASS)'
+  '.build_env.glibc="ldd (GNU libc) 2.34"|provenance mismatch: build_env (no Linux image/packages/glibc)'
+  '.build_env.image="amazonlinux:2023"|provenance mismatch: build_env (no Linux image/packages/glibc)'
+  '.runner.lscpu="Architecture: aarch64"|provenance mismatch: runner (no lscpu)'
+  '.link_line="-lllama -lggml -lggml-cpu -lggml-base -lstdc++ -lpthread -lm -ldl"|provenance mismatch: link_line'
+  '.link_check.passed=false|provenance mismatch: link_check'
+  '.link_check.system_libs=["stdc++","pthread","m","dl"]|provenance mismatch: link_check'
+  '.link_check.frameworks=["Accelerate"]|provenance mismatch: link_check'
+  '.link_check.backends=["CPU","Metal"]|provenance mismatch: link_check'
+  '.link_check.archive_order_back_references=1|provenance mismatch: link_check'
+  'del(.link_check)|provenance mismatch: link_check'
+  '.pgo.enabled=true|provenance mismatch: pgo'
+  '.llama_cpp.commit="wrong"|provenance mismatch: llama_cpp.commit'
+  '.host.native_build=false|provenance mismatch: host.native_build'
+  '.smoke={passed:false}|.smoke.passed: false, expected true'
+)
+for case in "${darwin_cases[@]}"; do
+  IFS='|' read -r alteration diagnostic <<<"${case}"
+  expect_verify_rejects raw aarch64-apple-darwin "${darwin}" "${diagnostic}" "${alteration}"
+done
+source "${ROOT}/scripts/config.env"
 
 expect_failure 'unknown verify-provenance option' "unknown option '--bogus'" \
   verify_provenance --bogus "${packaged}" "${profile}"
@@ -321,4 +489,17 @@ ALLOW_MISSING_RESULTS=1 run_package > "${TMP}/package.log" 2>&1 \
 expect_failure 'dev-packaged build-info.json without a benchmark result' '.benchmark: missing' verify_packaged
 expect_failure 'dev-packaged build-info.json with a failed correctness result' \
   '.correctness.passed: false, expected true' verify_packaged
-echo 'All source pin, provenance, release-result and package-gate regression tests passed'
+
+# A build-only profile is never packaged, whatever results it has, even for local dev
+# packaging (ALLOW_MISSING_RESULTS=1).
+for allow in 0 1; do
+  stage_package
+  cp "${darwin}" "${package_dir}/dist/build-info.json"
+  expect_failure "packaging aarch64-apple-darwin (ALLOW_MISSING_RESULTS=${allow})" \
+    'target profile aarch64-apple-darwin is build-only, not a release variant' \
+    env ALLOW_MISSING_RESULTS="${allow}" DIST="${package_dir}/dist" RESULTS="${package_dir}/results" \
+        SRC="${package_dir}/no-source" bash "${ROOT}/scripts/package.sh"
+  [[ "$(< "${package_dir}/dist/build-info.json")" == "$(< "${darwin}")" && ! -e "${package_dir}/dist/SHA256SUMS" ]] \
+    || { echo "FAIL: package.sh modified a build-only dist/ it refused" >&2; exit 1; }
+done
+echo 'All source pin, profile, provenance, release-result and package-gate regression tests passed'

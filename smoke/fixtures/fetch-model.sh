@@ -13,10 +13,14 @@
 #   https://huggingface.co/CompendiumLabs/bge-small-en-v1.5-gguf/resolve/main/bge-small-en-v1.5-q8_0.gguf
 # Download it once, run `sha256sum`, then set the two vars (repo variables in CI).
 #
-# Prints the resolved model path on stdout (also export SMOKE_MODEL to it).
+# Prints the resolved model path on stdout (also export SMOKE_MODEL to it). Download and
+# verification are scripts/lib.sh fetch_pinned_model (digests compared directly, so a
+# malformed SHA fails here too on macOS, whose sha256sum -c accepts one); its log goes to
+# stderr.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "${HERE}/../.." && pwd)"
 DEST="${HERE}/model.gguf"
 
 URL="${SMOKE_MODEL_URL:-}"
@@ -28,18 +32,8 @@ if [[ -z "${URL}" || -z "${SHA}" ]]; then
   exit 2
 fi
 
-verify() { echo "${SHA}  ${DEST}" | sha256sum -c - >/dev/null 2>&1; }
-
-if [[ -f "${DEST}" ]] && verify; then
-  echo "${DEST}"; exit 0
-fi
-
-echo "[fixtures] downloading ${URL}" >&2
-curl -fSL "${URL}" -o "${DEST}"
-if ! verify; then
-  echo "ERROR: SHA256 mismatch for ${DEST}" >&2
-  echo "  expected: ${SHA}" >&2
-  echo "  actual:   $(sha256sum "${DEST}" | awk '{print $1}')" >&2
-  exit 1
-fi
+source "${ROOT}/scripts/config.env"
+LIB_TAG=fixtures
+source "${ROOT}/scripts/lib.sh"
+fetch_pinned_model "${URL}" "${SHA}" "${DEST}" >&2
 echo "${DEST}"

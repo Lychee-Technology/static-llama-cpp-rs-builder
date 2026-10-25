@@ -1,6 +1,8 @@
 // Drop-in build.rs for linking the prebuilt static llama.cpp archives (either production
 // variant: aarch64-graviton2 or x86_64-v3; use the one whose build-info.json `target_triple`
-// equals your crate's target, the archives contain native code for that target only).
+// equals your crate's target, the archives contain native code for that target only). It
+// also links a build of the build-only aarch64-apple-darwin profile, which is not a
+// release variant and is not covered by CONTRACT.md.
 //
 // Copy this into your crate as `build.rs` (LTEmbed does this), or `include!` it.
 // Point STATIC_LLAMA_DIR at the directory of a VERIFIED, extracted release — the one
@@ -34,9 +36,19 @@ fn main() {
         println!("cargo:rustc-link-lib=static={lib}");
     }
 
-    // C++ runtime + OS deps (== config.env SYSTEM_LINK_LIBS, == build-info.json link_line
-    // tail). Dynamic from the base image. No -lgomp: OpenMP is disabled (ggml threadpool).
-    for lib in ["stdc++", "pthread", "m", "dl"] {
+    // C++ runtime + OS deps of the TARGET OS (== config.env SYSTEM_LINK_LIBS of its profile,
+    // == build-info.json link_line tail), linked dynamically from the system. No -lgomp:
+    // OpenMP is disabled (ggml threadpool).
+    //   linux: GNU libstdc++ and glibc, from the base image.
+    //   macos: libc++ only; libSystem is implicit, and no framework is needed (ggml's Metal
+    //          and Accelerate backends are off).
+    // There are no archives for any other OS, so anything else fails here, not at link time.
+    let system_libs: &[&str] = match env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("linux") => &["stdc++", "pthread", "m", "dl"],
+        Ok("macos") => &["c++"],
+        other => panic!("no static llama.cpp archives for target OS {other:?} (linux and macos only)"),
+    };
+    for lib in system_libs {
         println!("cargo:rustc-link-lib=dylib={lib}");
     }
 

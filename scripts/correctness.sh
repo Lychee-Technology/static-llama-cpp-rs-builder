@@ -38,6 +38,8 @@ source "${ROOT}/scripts/lib.sh"
 # Same native-host / build-input gates as build.sh (the generic baseline is compiled too); before any side effect.
 assert_native_host
 assert_no_build_env_overrides
+# Release gate only: a build-only profile has no correctness/benchmark gate yet (issue #22).
+assert_release_profile "${TARGET_PROFILE}"
 
 DIST="${DIST:-${ROOT}/dist}"
 RESULTS="${RESULTS:-${ROOT}/.build/results}"

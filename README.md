@@ -5,6 +5,10 @@ Produces **static llama.cpp archives** for two fixed production targets, a Gravi
 provenance + checksums so LTEmbed can link it directly, with no per-build llama.cpp
 recompile.
 
+A third, **build-only** profile, `aarch64-apple-darwin`, builds the same four archives and
+bindings natively on an Apple Silicon Mac for local development. It is gated like the
+production builds but is not released (see [below](#build-only-apple-silicon-macos)).
+
 ## Support matrix
 
 | Architecture | Target | CPU baseline | Native build requirement |
@@ -23,6 +27,22 @@ There are exactly two artifact variants:
 There is no x86-64-v2 or generic x86 artifact, and no runtime ISA fallback. The x86-64
 archives require AVX, AVX2, BMI1/BMI2, F16C, FMA, LZCNT and MOVBE, and will fault with
 SIGILL on older CPUs.
+
+### Build-only: Apple Silicon macOS
+
+| Architecture | Target | CPU baseline | Native build requirement |
+|---|---|---|---|
+| ARM64 (Apple) | `aarch64-apple-darwin` | `apple-m1` (`-mcpu=apple-m1`: Armv8.5-A + fp16, fp16fml, dotprod, rcpc, lse, crc, aes, sha2, sha3; no i8mm, bf16, SVE or SME), macOS 11.0 deployment target | Apple Silicon Mac with Xcode's Apple clang 17, not under Rosetta 2 |
+
+`scripts/build.sh` selects this profile from `uname -s` = `Darwin` and `uname -m` = `arm64`,
+never from `arm64` alone. It is CPU-only: Metal, Accelerate, BLAS, KleidiAI, OpenMP, dynamic
+backend loading and LTO are all off, so the archives run ggml's CPU kernels, as on Linux
+ARM64. Consumers link `-lc++` and no frameworks.
+
+It is **not a release variant**: `build-info.json` records `"build_only": true` and
+`"artifact_contract_version": null`, and `package.sh`, `correctness.sh`, `bench.sh` and
+`verify-provenance.sh --packaged` refuse it. Release integration (CI job, packaging,
+correctness/benchmark ports, contract version) is issue #22.
 
 ## What a release contains
 
@@ -57,9 +77,9 @@ build image. CI gates the environment envelope (`EXPECTED_CLANG_MAJOR`, `MIN_GLI
 ## How it works
 
 1. `scripts/build.sh`:
-   1. Selects the target profile from the **native** host architecture (`scripts/config.env`).
-      It refuses anything that is not a native build (see below). On x86-64 it also runs
-      the fail-closed x86-64-v3 CPU gate.
+   1. Selects the target profile from the **native** host OS and architecture
+      (`scripts/config.env`). It refuses anything that is not a native build (see below).
+      On x86-64 it also runs the fail-closed x86-64-v3 CPU gate.
    2. Clones the pinned llama-cpp-rs commit and checks out llama.cpp `v0.7.0` in place of
       the crate's submodule, verifying both by commit.
    3. Builds `llama-cpp-sys-2` with the profile's fixed flags injected:
@@ -122,12 +142,13 @@ exactly the two variants. Its notes quote the verified llama.cpp tag and commit 
 tarball's SHA-256.
 
 **Native builds only.** The actual host, container, compiler and artifact architectures must
-all be the same: `aarch64` for the ARM64 variant, `x86_64` for the x86-64 variant. The
-following are not supported:
+all be the same: `aarch64` for the ARM64 variant, `x86_64` for the x86-64 variant, and
+`arm64` (`aarch64-apple-darwin`) for the build-only macOS profile. The following are not
+supported:
 - cross compilation in either direction (x86 → ARM, ARM → x86): foreign `--target`, cross
   gcc, CMake cross toolchain files, cross-rs, cargo-zigbuild, zig;
 - CPU emulation: QEMU, binfmt_misc, Docker Buildx architecture emulation or
-  `docker --platform` for a foreign arch.
+  `docker --platform` for a foreign arch, or Rosetta 2 on macOS.
 
 `scripts/assert-native-runner.sh <arch>` (CI), the Dockerfile and `scripts/lib.sh`
 (`assert_native_host`) each refuse a non-native build:
@@ -138,6 +159,10 @@ following are not supported:
   `uname -m` alone is not trusted. `scripts/check-x86-64-v3.sh` checks CPUID + XGETBV
   (AVX, AVX2, BMI1, BMI2, F16C, FMA, LZCNT, MOVBE, OS-enabled AVX state, …), glibc's hwcaps
   and `/proc/cpuinfo`.
+- macOS hosts that are not Apple Silicon, or that run the build under Rosetta 2, get
+  *"Apple Silicon macOS artifacts must be built natively on an Apple Silicon Mac.
+  Cross-compilation, Rosetta 2 and CPU emulation are not supported."* `lib.sh` also requires
+  `sysctl.proc_translated` = 0 and the apple-m1 `hw.optional` CPU features.
 
 ## Local run (on a native aarch64 or x86-64-v3 Linux host)
 
@@ -171,7 +196,9 @@ model migration must separately verify prompts, tokenizer parity, pooling, the l
 projection and independent FP32 embeddings before updating its release inputs.
 
 Offline input/gate tests: `bash scripts/test-source-pins.sh`. They use scratch Git
-repositories and synthetic metadata, not real build or model-correctness validation.
+repositories and synthetic metadata, not real build or model-correctness validation. On an
+Apple Silicon Mac, `bash scripts/test-macos-gates.sh` also exercises the macOS object,
+order, link and ISA gates on small synthetic sources.
 
 ### Optional: PGO-optimized build
 
@@ -192,3 +219,38 @@ PGO=1 SMOKE_MODEL="$SMOKE_MODEL"     scripts/bench.sh    # reports pgo_gain + a 
 `pgo.meta.json` is for another architecture or baseline, and writes the measured `pgo_gain`
 into `bench.json`. Needs `llvm-profdata`
 (`llvm18`) and the compiler-rt profile runtime in the image. Default builds are non-PGO.
+
+## Local build on Apple Silicon macOS (build-only)
+
+Runs directly on the Mac, with no Docker. It needs Xcode (Apple clang 17 and the macOS
+SDK, selected with `xcode-select`), CMake, `git`, `jq` and the Rust toolchain from
+`rust-toolchain.toml` via rustup. The SDK, Xcode, compiler path and CMake version are
+recorded in `build-info.json` (`build_env`, `cmake`) rather than pinned.
+
+```sh
+scripts/build.sh                      # dist/: 4 archives, bindings.rs, headers, build-info.json
+scripts/verify-provenance.sh --raw    # --packaged refuses a build-only profile
+export SMOKE_MODEL="$(smoke/fixtures/fetch-model.sh)"   # needs SMOKE_MODEL_URL / _SHA256
+export RESULTS="$PWD/.build/results"; mkdir -p "$RESULTS"
+SMOKE_RESULT="$RESULTS/smoke.json" cargo run --release --manifest-path smoke/Cargo.toml
+bash scripts/embeddinggemma-smoke.sh
+bash scripts/logits-smoke.sh
+```
+
+On macOS `build.sh` gates the following, in addition to the pins and the exact archive and
+bindings set:
+- Apple clang 17 for both `CC` and `CXX`;
+- the CMake cache: Darwin/arm64, AppleClang, the pinned `CMAKE_OSX_DEPLOYMENT_TARGET`,
+  Metal/Accelerate/BLAS/KleidiAI off, and ggml's probed CPU features consistent with
+  apple-m1 (dotprod and fp16 vector arithmetic; no SVE, i8mm or SME);
+- every TU's flags (`-mcpu=apple-m1`, the pinned `-mmacosx-version-min`, `-arch arm64`, and
+  no `-march`/`-mtune`/`native`/LTO/OpenMP), plus the frontend macros and backend
+  `-target-cpu` of each flag set;
+- every archive member: thin arm64, the macOS platform, the pinned minimum OS, the
+  recorded SDK, and no weak-undefined (unguarded newer-than-target) API;
+- archive order with no back-references;
+- a probe link of the archives with only the recorded system libraries, each of which must
+  be required. The probe binary may load nothing beyond `libSystem` and `libc++` and must
+  report the CPU backend only.
+
+`PGO=1` is refused on this profile.
