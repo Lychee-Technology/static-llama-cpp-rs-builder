@@ -39,6 +39,13 @@ A release carries exactly these two variants:
 | `aarch64-graviton2` | `static-llama-cpp-<tag>-aarch64-graviton2.tar.gz` |
 | `x86_64-v3` | `static-llama-cpp-<tag>-x86_64-v3-linux-gnu.tar.gz` |
 
+**Build-only profile, outside this contract.** `scripts/config.env` also defines
+`aarch64-apple-darwin`, a native CPU-only build for Apple Silicon macOS (`apple-m1` CPU
+baseline, pinned minimum macOS). It is not a release variant and carries none of the
+guarantees below. Its `build-info.json` records `"build_only": true` and
+`"artifact_contract_version": null`, no release ships it, and `package.sh` and
+`verify-provenance.sh --packaged` refuse it. Releasing it is a contract change (issue #22).
+
 There is no x86-64-v2 or generic x86 variant, and no runtime ISA dispatch or fallback. The
 x86-64 archives execute AVX/AVX2/BMI1/BMI2/F16C/FMA/LZCNT/MOVBE instructions
 unconditionally and fault (SIGILL) on a CPU below x86-64-v3. The required baseline is part
@@ -208,6 +215,10 @@ LICENSES/       llama.cpp (covers ggml) and builder licenses (all MIT)
    ```
    -lllama -lggml -lggml-cpu -lggml-base -lstdc++ -lpthread -lm -ldl
    ```
+   `consume.build.rs` chooses the system libraries by the target OS, and for a Linux
+   target it emits exactly this line. Its macOS branch (`-lc++` only) exists for the
+   build-only `aarch64-apple-darwin` profile, which is outside this contract. Any other
+   target OS fails the build script.
 4. **Bind.** Use the shipped `bindings.rs` (the build.rs exports its path as
    `STATIC_LLAMA_BINDINGS`):
    ```rust
