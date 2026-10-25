@@ -300,7 +300,7 @@ prepare_crate_source() {
   _lib_log "llama.cpp ${LLAMA_CPP_DESCRIBE} @ ${LLAMA_CPP_COMMIT} (tag object type ${LLAMA_CPP_TAG_TYPE}, ${LLAMA_CPP_DATE})"
 }
 
-# --- N1 ISA injection -----------------------------------------------------------------
+# --- N1 ISA injection (aarch64-graviton2 only) ------------------------------------------
 # For Linux aarch64 (non-native) the crate hardcodes GGML_CPU_ARM_ARCH="armv8-a", which
 # ggml turns into -march=armv8-a (no dotprod) on the CPU kernels. That define comes AFTER
 # the crate's GGML_* env forwarding, so an env var cannot override it: rewrite the literal
@@ -347,9 +347,10 @@ cmake_cache_get() {
 # wrapper archive and llama_rs_* declarations to bindings.rs. --locked: the crate's own
 # Cargo.lock pins bindgen/cc/cmake. Caller exports CFLAGS/CXXFLAGS/CARGO_TARGET_DIR.
 # Remaining args are GGML_*=VALUE assignments from config.env (the profile's
-# GGML_ISA_DEFINES, or GENERIC_REF_GGML_DEFINES for the correctness reference); they reach
-# CMake through the crate's GGML_* env forwarding for this one cargo invocation only, so
-# assert_no_build_env_overrides still guarantees nothing else injects GGML_* options.
+# GGML_ISA_DEFINES and GGML_BACKEND_DEFINES, or GENERIC_REF_GGML_DEFINES for the
+# correctness reference); they reach CMake through the crate's GGML_* env forwarding for
+# this one cargo invocation only, so assert_no_build_env_overrides still guarantees nothing
+# else injects GGML_* options.
 build_sys_crate() {
   local dir="$1" a; shift
   for a in "$@"; do
@@ -497,6 +498,193 @@ x86_disasm_scan() {
       for (c in cnt) { printf "category %s %d\n", c, cnt[c]; bad += cnt[c] }
       exit (bad > 0 || n == 0) ? 1 : 0
     }'
+}
+
+# --- macOS (aarch64-apple-darwin) gates -------------------------------------------------
+# The macOS archives must be apple-m1 code for macOS >= MACOS_DEPLOYMENT_TARGET that a
+# consumer links with SYSTEM_LINK_LIBS alone. As with the x86 gates, each property is proven
+# on what the compiler and linker actually did, not inferred from the requested flags:
+#   apple_m1_isa_check   a TU's exact flags give apple-m1 in the frontend (feature macros)
+#                        AND in the backend (the -cc1 job's -target-cpu / -target-feature);
+#   macos_objects_check  every archive member is a thin arm64 Mach-O object for macOS with
+#                        minos == the pin, built against the recorded SDK, and with no weak
+#                        undefined symbol (an API newer than minos used without a guard);
+#   archive_order_check  the STATIC_LIBS order resolves in one left-to-right pass;
+#   macos_link_check     a C consumer links EVERY member (-all_load) with SYSTEM_LINK_LIBS
+#                        only, each of them necessary, depends on system dylibs only (no
+#                        framework), and runs with the CPU backend as the only backend.
+APPLE_M1_REQUIRED_MACROS="__ARM_NEON __ARM_FEATURE_FMA __ARM_FEATURE_DOTPROD __ARM_FEATURE_FP16_VECTOR_ARITHMETIC __ARM_FEATURE_FP16_SCALAR_ARITHMETIC __ARM_FEATURE_FP16_FML __ARM_FEATURE_ATOMICS __ARM_FEATURE_QRDMX __ARM_FEATURE_RCPC __ARM_FEATURE_JCVT __ARM_FEATURE_COMPLEX __ARM_FEATURE_CRC32 __ARM_FEATURE_AES __ARM_FEATURE_SHA2 __ARM_FEATURE_SHA3 __ARM_FEATURE_SHA512 __ARM_FEATURE_FRINT"
+APPLE_ABOVE_M1_MACRO_RE='^__ARM_(ARCH_(8_[6-9]|9[0-9_]*)__|FEATURE_(MATMUL_INT8|BF16[A-Z0-9_]*|SVE[A-Z0-9_]*|SME[A-Z0-9_]*|SM3|SM4|MEMORY_TAGGING|LS64|RNG|MOPS|CSSC|FP8[A-Z0-9_]*|GCS[A-Z0-9_]*))$'
+# clang names the -mcpu=apple-m1 backend CPU by its alias apple-a14 (apple-m1 when it is
+# the target's default CPU); both have the same feature set.
+APPLE_M1_BACKEND_CPUS="apple-m1 apple-a14"
+APPLE_M1_REQUIRED_TARGET_FEATURES="v8.5a neon fullfp16 fp16fml dotprod lse rdm rcpc crc aes sha2 sha3 jsconv complxnum"
+APPLE_ABOVE_M1_TARGET_FEATURE_RE='^(v8\.[6-9]a|v9(\.[0-9])?a|i8mm|bf16|sve.*|sme.*|f32mm|f64mm|mte|ls64|fp8.*|cssc|mops|hbc|wfxt|gcs)$'
+
+# apple_m1_isa_check COMPILER [FLAGS...]: on success print the backend CPU name; otherwise
+# print the reason and return 1.
+apple_m1_isa_check() {
+  local cc="$1" defs m missing="" extra cc1 cpu feats f; shift
+  defs="$("${cc}" "$@" -dM -E -x c /dev/null 2>&1)" || { echo "preprocessor failed: ${defs}"; return 1; }
+  defs="$(sed -n 's/^#define \(__ARM_[A-Za-z0-9_]*\) .*/\1/p' <<<"${defs}")"
+  for m in ${APPLE_M1_REQUIRED_MACROS}; do
+    grep -qxF -- "${m}" <<<"${defs}" || missing+="${m} "
+  done
+  extra="$(grep -E -- "${APPLE_ABOVE_M1_MACRO_RE}" <<<"${defs}" | tr '\n' ' ' || true)"
+  if [[ -n "${missing}" || -n "${extra}" ]]; then
+    echo "frontend: missing apple-m1 features: ${missing:-none}; above-apple-m1 features: ${extra:-none}"
+    return 1
+  fi
+  # The code generator's view: the -cc1 job clang would run. Its -target-feature list is
+  # applied in order, so the last +name / -name of each feature wins.
+  cc1="$("${cc}" "$@" -### -x c -c /dev/null -o /dev/null 2>&1)" || { echo "clang -### failed: ${cc1}"; return 1; }
+  cpu="$(tr ' ' '\n' <<<"${cc1}" | tr -d '"' | awk 'p == "-target-cpu" { c = $0 } { p = $0 } END { print c }')"
+  feats="$(tr ' ' '\n' <<<"${cc1}" | tr -d '"' | awk '
+    p == "-target-feature" {
+      n = substr($0, 2); st[n] = substr($0, 1, 1)
+      if (!(n in seen)) { seen[n] = 1; ord[++k] = n }
+    }
+    { p = $0 }
+    END { for (i = 1; i <= k; i++) if (st[ord[i]] == "+") print ord[i] }')"
+  case " ${APPLE_M1_BACKEND_CPUS} " in
+    *" ${cpu} "*) ;;
+    *) echo "backend: -target-cpu '${cpu:-<none>}', expected one of: ${APPLE_M1_BACKEND_CPUS}"; return 1 ;;
+  esac
+  for f in ${APPLE_M1_REQUIRED_TARGET_FEATURES}; do
+    grep -qxF -- "${f}" <<<"${feats}" || missing+="+${f} "
+  done
+  extra="$(grep -E -- "${APPLE_ABOVE_M1_TARGET_FEATURE_RE}" <<<"${feats}" | sed 's/^/+/' | tr '\n' ' ' || true)"
+  if [[ -n "${missing}" || -n "${extra}" ]]; then
+    echo "backend (-target-cpu ${cpu}): missing apple-m1 features: ${missing:-none}; above-apple-m1 features: ${extra:-none}"
+    return 1
+  fi
+  echo "${cpu}"
+}
+
+# macos_objects_check MINOS SDK ARCHIVE...: on success print a JSON summary; otherwise
+# print the reason and return 1.
+macos_objects_check() {
+  local minos="$1" sdk="$2" a archs members report weak total=0; shift 2
+  for a in "$@"; do
+    archs="$(lipo -archs "${a}" 2>&1)" || { echo "lipo failed on ${a}: ${archs}"; return 1; }
+    [[ "${archs}" == arm64 ]] || { echo "${a}: architectures '${archs}', expected thin arm64"; return 1; }
+    members="$(ar -t "${a}" | grep -vc '^__\.SYMDEF' || true)"
+    report="$(otool -l "${a}" | awk -v want_min="${minos}" -v want_sdk="${sdk}" '
+      /^[^ ].*\(.*\):$/ { m = $0; sub(/:$/, "", m); n++; bv[m] = 0; next }
+      $1 == "cmd" {
+        inbv = ($2 == "LC_BUILD_VERSION"); if (inbv) bv[m]++
+        if ($2 ~ /^LC_VERSION_MIN_/) old[m] = " " $2
+        next
+      }
+      inbv && $1 == "platform" { pl[m] = $2 }
+      inbv && $1 == "minos"    { mi[m] = $2 }
+      inbv && $1 == "sdk"      { sd[m] = $2 }
+      END {
+        bad = 0
+        for (x in bv) if (bv[x] != 1 || pl[x] != "1" || mi[x] != want_min || sd[x] != want_sdk) {
+          if (++bad <= 10) printf "  %s: LC_BUILD_VERSION x%d platform=%s minos=%s sdk=%s%s\n", x, bv[x], pl[x], mi[x], sd[x], old[x]
+        }
+        printf "members %d\n", n
+        exit (bad > 0)
+      }')" || { echo "${a}: objects not built for macOS (platform 1) minos ${minos} with SDK ${sdk}:"$'\n'"${report}"; return 1; }
+    [[ "$(sed -n 's/^members //p' <<<"${report}")" == "${members}" && "${members}" -gt 0 ]] \
+      || { echo "${a}: otool saw $(sed -n 's/^members //p' <<<"${report}") object(s), ar lists ${members}"; return 1; }
+    total=$((total + members))
+  done
+  weak="$(nm -m "$@" | grep '(undefined) weak external' || true)"
+  if [[ -n "${weak}" ]]; then
+    echo "weak undefined symbols (an API newer than macOS ${minos} used without an availability guard): $(head -n 10 <<<"${weak}" | tr '\n' ' ')"
+    return 1
+  fi
+  jq -n --argjson archives "$#" --argjson objects "${total}" --arg minos "${minos}" --arg sdk "${sdk}" \
+    '{archives: $archives, objects: $objects, arch: "arm64", platform: "macos",
+      minos: $minos, sdk: $sdk, weak_undefined: 0}'
+}
+
+# archive_order_check ARCHIVE...: the archives in link order. Fails (printing which) if an
+# archive needs an external symbol that only an EARLIER archive defines, i.e. if the order
+# could not be resolved in a single left-to-right pass.
+archive_order_check() {
+  local dir a i j n=$# report=""
+  dir="$(mktemp -d)"
+  i=0
+  for a in "$@"; do
+    nm -g --defined-only "${a}" | awk 'NF >= 3 { print $3 }' | sort -u >"${dir}/def.${i}" \
+      && nm -g --undefined-only "${a}" | awk 'NF >= 1 && $0 !~ /:$/ { print $NF }' | sort -u >"${dir}/und.${i}" \
+      || { rm -rf "${dir}"; echo "nm failed on ${a}"; return 1; }
+    i=$((i + 1))
+  done
+  for ((i = 1; i < n; i++)); do
+    : >"${dir}/later"; : >"${dir}/earlier"
+    for ((j = 0; j < n; j++)); do
+      if (( j < i )); then cat "${dir}/def.${j}" >>"${dir}/earlier"; else cat "${dir}/def.${j}" >>"${dir}/later"; fi
+    done
+    sort -u -o "${dir}/later" "${dir}/later"; sort -u -o "${dir}/earlier" "${dir}/earlier"
+    comm -23 "${dir}/und.${i}" "${dir}/later" | comm -12 - "${dir}/earlier" >"${dir}/back"
+    if [[ -s "${dir}/back" ]]; then
+      report+="archive #$((i + 1)) needs $(wc -l <"${dir}/back" | tr -d ' ') symbol(s) only an earlier archive defines (e.g. $(head -n 5 "${dir}/back" | tr '\n' ' ')); "
+    fi
+  done
+  rm -rf "${dir}"
+  [[ -z "${report}" ]] || { echo "${report}"; return 1; }
+}
+
+# macos_link_check WORKDIR MINOS ARCHIVE...: link and run a C consumer of the archives (in
+# link order) against SYSTEM_LINK_LIBS. On success print a JSON summary; otherwise print the
+# reason and return 1. Needs ${DIST}/include (llama.h, ggml-backend.h) and ${CC}.
+macos_link_check() {
+  local work="$1" minos="$2" l k libs=() link=() deps dep out bv ldv; shift 2
+  mkdir -p "${work}"
+  cat >"${work}/link-probe.c" <<'PROBE'
+#include <stdio.h>
+#include "ggml-backend.h"
+#include "llama.h"
+int main(void) {
+    llama_backend_init();
+    for (size_t i = 0; i < ggml_backend_reg_count(); i++) {
+        printf("backend %s\n", ggml_backend_reg_name(ggml_backend_reg_get(i)));
+    }
+    printf("system_info %s\n", llama_print_system_info());
+    llama_backend_free();
+    return 0;
+}
+PROBE
+  for l in ${SYSTEM_LINK_LIBS}; do libs+=("-l${l}"); done
+  link=("${CC}" -mmacosx-version-min="${minos}" -I"${DIST}/include" "${work}/link-probe.c"
+        -Wl,-all_load "$@")
+  out="$("${link[@]}" ${libs[@]+"${libs[@]}"} -Wl,-fatal_warnings -o "${work}/link-probe" 2>&1)" \
+    || { echo "link with ${libs[*]:-no system libs} (-all_load, every member) failed: ${out}"; return 1; }
+  # Each SYSTEM_LINK_LIBS entry is NEEDED: leaving any one out must break the link.
+  for l in ${SYSTEM_LINK_LIBS}; do
+    libs=(); for k in ${SYSTEM_LINK_LIBS}; do [[ "${k}" == "${l}" ]] || libs+=("-l${k}"); done
+    if "${link[@]}" ${libs[@]+"${libs[@]}"} -o "${work}/link-probe-without" >/dev/null 2>&1; then
+      echo "the archives also link without -l${l}: SYSTEM_LINK_LIBS is not minimal"; return 1
+    fi
+  done
+  # Runtime dependencies: libSystem plus exactly the SYSTEM_LINK_LIBS dylibs, all from
+  # /usr/lib; no framework, nothing outside the OS.
+  deps="$(otool -L "${work}/link-probe" | tail -n +2 | awk '{ print $1 }')"
+  while IFS= read -r dep; do
+    [[ "${dep}" == /usr/lib/libSystem.B.dylib ]] && continue
+    for l in ${SYSTEM_LINK_LIBS}; do [[ "${dep}" == /usr/lib/lib"${l}".*dylib ]] && continue 2; done
+    echo "unexpected runtime dependency ${dep} (allowed: /usr/lib/libSystem.B.dylib and SYSTEM_LINK_LIBS '${SYSTEM_LINK_LIBS}')"; return 1
+  done <<<"${deps}"
+  grep -qx /usr/lib/libSystem.B.dylib <<<"${deps}" || { echo "no libSystem dependency: ${deps}"; return 1; }
+  for l in ${SYSTEM_LINK_LIBS}; do
+    grep -qF "/usr/lib/lib${l}." <<<"${deps}" || { echo "no runtime dependency on lib${l}: ${deps}"; return 1; }
+  done
+  bv="$(otool -l "${work}/link-probe" | awk '$1 == "cmd" { inbv = ($2 == "LC_BUILD_VERSION") } inbv && $1 == "minos" { print $2 }')"
+  [[ "${bv}" == "${minos}" ]] || { echo "consumer binary minos '${bv}', expected ${minos}"; return 1; }
+  out="$("${work}/link-probe" 2>&1)" || { echo "consumer binary failed to run: ${out}"; return 1; }
+  [[ "$(sed -n 's/^backend //p' <<<"${out}")" == CPU ]] \
+    || { echo "expected the CPU backend as the only ggml backend, got: $(sed -n 's/^backend //p' <<<"${out}" | tr '\n' ' ')"; return 1; }
+  ldv="$(ld -v 2>&1 || true)"
+  jq -n --arg linker "$(head -n 1 <<<"${ldv}")" --arg libs "${SYSTEM_LINK_LIBS}" --arg deps "${deps}" \
+        --arg minos "${minos}" --arg info "$(sed -n 's/^system_info //p' <<<"${out}")" \
+    '{passed: true, linker: $linker, mode: "-Wl,-all_load -Wl,-fatal_warnings",
+      system_libs: ($libs | split(" ") | map(select(. != ""))), each_system_lib_required: true,
+      runtime_dylibs: ($deps | split("\n") | map(select(. != ""))), frameworks: [],
+      minos: $minos, backends: ["CPU"], system_info: $info}'
 }
 
 # --- Pinned test models -----------------------------------------------------------------
