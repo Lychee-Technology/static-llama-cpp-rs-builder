@@ -24,6 +24,9 @@ SRC="${SRC:-${ROOT}/.build/llama-cpp-rs}"
 log() { printf '\033[1;34m[package]\033[0m %s\n' "$*"; }
 
 [[ -f "${DIST}/build-info.json" ]] || { echo "run build.sh first" >&2; exit 1; }
+# Only release variants are packaged (never a build-only profile), whatever
+# ALLOW_MISSING_RESULTS says.
+assert_release_profile "$(jq -r '.target_profile' "${DIST}/build-info.json")"
 
 # --- Merge smoke + benchmark + correctness results --------------------------------
 smoke_json="null"; bench_json="null"; correctness_json="null"

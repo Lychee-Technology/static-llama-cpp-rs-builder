@@ -27,6 +27,52 @@ expect_failure() {
   echo "PASS: rejects ${label}"
 }
 
+# --- Target profiles ------------------------------------------------------------------
+# Selected by OS AND architecture: an arm64 Mac used to be taken for a Graviton2 host.
+for case in Linux/aarch64=aarch64-graviton2 Linux/arm64=aarch64-graviton2 Linux/x86_64=x86_64-v3 \
+            Linux/amd64=x86_64-v3 Darwin/arm64=aarch64-apple-darwin Darwin/x86_64= Darwin/i386= \
+            FreeBSD/aarch64= FreeBSD/amd64=; do
+  host="${case%%=*}" want="${case#*=}"
+  got="$(host_target_profile "${host%/*}" "${host#*/}")"
+  [[ "${got}" == "${want}" ]] \
+    || { echo "FAIL: host ${host} selects profile '${got}', expected '${want:-none}'" >&2; exit 1; }
+done
+echo "PASS: selects the target profile by OS and architecture"
+# Every profile sets every variable, with fixed, host-independent flags.
+profile_vars="TARGET_PROFILE TARGET_OS TARGET_ARCH NATIVE_ARCH TARGET_TRIPLE CPU_BASELINE CPU_MARCH CPU_MCPU CPU_MTUNE CPU_PROFILE CFLAGS_TUNE GGML_ISA_DEFINES GGML_BACKEND_DEFINES MACOS_DEPLOYMENT_TARGET SYSTEM_LINK_LIBS ARTIFACT_VARIANT GENERIC_REF_MARCH GENERIC_REF_GGML_DEFINES"
+for profile in ${SUPPORTED_TARGET_PROFILES} ${BUILD_ONLY_TARGET_PROFILES}; do
+  for v in ${profile_vars}; do unset "${v}"; done
+  set_target_profile "${profile}"
+  for v in ${profile_vars}; do
+    [[ -n "${!v+set}" ]] || { echo "FAIL: profile ${profile} does not set ${v}" >&2; exit 1; }
+  done
+  [[ "${TARGET_PROFILE}" == "${profile}" && "${TARGET_TRIPLE%%-*}" == "${TARGET_ARCH}" ]] \
+    || { echo "FAIL: profile ${profile} sets TARGET_PROFILE=${TARGET_PROFILE} TARGET_TRIPLE=${TARGET_TRIPLE}" >&2; exit 1; }
+  [[ "${CFLAGS_TUNE} ${GGML_ISA_DEFINES} ${GGML_BACKEND_DEFINES}" != *native* ]] \
+    || { echo "FAIL: profile ${profile} has a host-derived (native) flag: ${CFLAGS_TUNE}" >&2; exit 1; }
+done
+case " ${SUPPORTED_TARGET_PROFILES} " in
+  *" aarch64-apple-darwin "*) echo "FAIL: the build-only profile is listed as a release variant" >&2; exit 1 ;;
+esac
+set_target_profile aarch64-apple-darwin
+[[ "${TARGET_OS}/${NATIVE_ARCH}/${TARGET_TRIPLE}" == macos/arm64/aarch64-apple-darwin \
+   && "${CFLAGS_TUNE}" == "-O3 -mcpu=apple-m1" && -z "${CPU_MARCH}${CPU_MTUNE}" \
+   && "${GGML_BACKEND_DEFINES}" == "GGML_METAL=OFF GGML_ACCELERATE=OFF" \
+   && "${MACOS_DEPLOYMENT_TARGET}" == 11.0 && "${SYSTEM_LINK_LIBS}" == "c++" ]] \
+  || { echo "FAIL: aarch64-apple-darwin profile drifted: ${CFLAGS_TUNE} / ${GGML_BACKEND_DEFINES} / ${MACOS_DEPLOYMENT_TARGET} / ${SYSTEM_LINK_LIBS}" >&2; exit 1; }
+for profile in aarch64-graviton2 x86_64-v3; do
+  set_target_profile "${profile}"
+  [[ "${TARGET_OS}" == linux && "${NATIVE_ARCH}" == "${TARGET_ARCH}" && -z "${CPU_MCPU}${GGML_BACKEND_DEFINES}${MACOS_DEPLOYMENT_TARGET}" \
+     && "${SYSTEM_LINK_LIBS}" == "stdc++ pthread m dl" ]] \
+    || { echo "FAIL: Linux profile ${profile} changed: os=${TARGET_OS} mcpu=${CPU_MCPU} libs=${SYSTEM_LINK_LIBS}" >&2; exit 1; }
+done
+echo "PASS: every profile is complete and fixed; Linux profiles unchanged; macOS is build-only, -mcpu=apple-m1, CPU-only"
+for profile in ${SUPPORTED_TARGET_PROFILES}; do assert_release_profile "${profile}"; done
+expect_failure 'the build-only profile as a release profile' \
+  'target profile aarch64-apple-darwin is build-only, not a release variant' assert_release_profile aarch64-apple-darwin
+expect_failure 'an unknown release profile' "'bogus' is not a release target profile" assert_release_profile bogus
+expect_failure 'an unknown target profile' "unsupported target profile 'bogus'" set_target_profile bogus
+
 # --- Portable checksums and archive harvesting ---------------------------------------
 : >"${TMP}/empty"
 [[ "$(sha256_file "${TMP}/empty")" == e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ]] \
@@ -61,6 +107,7 @@ expect_failure 'a missing installed archive' 'installed archive set differs from
 stage_out_dir; : >"${TMP}/out/lib/libggml-metal.a"
 expect_failure 'an extra installed archive (e.g. a Metal backend)' 'installed archive set differs from STATIC_LIBS' \
   harvest_sys_outputs "${TMP}/out" "${TMP}/harvest"
+source "${ROOT}/scripts/config.env"
 
 for type in tag commit; do
   LLAMA_CPP_DIR="${TMP}/${type}"

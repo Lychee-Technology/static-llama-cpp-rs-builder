@@ -10,27 +10,33 @@ _lib_log() { printf '\033[1;34m[%s]\033[0m %s\n' "${LIB_TAG:-lib}" "$*"; }
 _LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Native-host gate --------------------------------------------------------------
-# Artifacts are compiled ONLY on a native host of the target architecture:
-#   actual host arch == container arch == compiler arch == artifact arch.
-# Cross compilation (x86 -> ARM, ARM -> x86) and CPU emulation (QEMU user-mode /
-# binfmt_misc, `docker --platform` of a foreign arch, buildx emulation) are NOT supported.
-# qemu-user fakes `uname -m`, so the kernel's own arch (/proc/sys/kernel/arch, answered by
-# the real kernel) and the binfmt_misc table are checked too. An x86-64 host must
-# additionally be x86-64-v3 capable (scripts/check-x86-64-v3.sh) — fail-closed, with no
-# fallback to a lower baseline.
+# Artifacts are compiled ONLY on a native host of the target OS and architecture:
+#   actual host arch == container arch (Linux) == compiler arch == artifact arch.
+# Cross compilation (x86 -> ARM, ARM -> x86, Linux <-> macOS) and CPU emulation (QEMU
+# user-mode / binfmt_misc, `docker --platform` of a foreign arch, buildx emulation,
+# Rosetta 2) are NOT supported. qemu-user fakes `uname -m`, so on Linux the kernel's own
+# arch (/proc/sys/kernel/arch, answered by the real kernel) and the binfmt_misc table are
+# checked too; on macOS the kernel's sysctls say whether the CPU is arm64 and whether this
+# process is translated. An x86-64 host must additionally be x86-64-v3 capable
+# (scripts/check-x86-64-v3.sh), and a macOS host must have every apple-m1 feature
+# (macos_host_cpu_check) — fail-closed, with no fallback to a lower baseline.
 NATIVE_HOST_MSG_ARM64="ARM64 artifacts must be built on a native ARM64 host. Cross-compilation and CPU emulation are not supported."
 NATIVE_HOST_MSG_X86_64="x86-64 artifacts must be built on a native x86-64 (x86-64-v3 capable) host. Cross-compilation and CPU emulation are not supported."
+NATIVE_HOST_MSG_MACOS_ARM64="Apple Silicon macOS artifacts must be built natively on an Apple Silicon Mac. Cross-compilation, Rosetta 2 and CPU emulation are not supported."
 # On success sets (global): HOST_CPU_MODEL, HOST_CPU_JSON (provenance).
 assert_native_host() {
-  local m karch rhost tool mach v msg arch_re probe_json
-  m="$(uname -m)"
+  local os m karch rhost tool mach v msg arch_re want_os probe_json
+  os="$(uname -s)"; m="$(uname -m)"
   [[ -n "${TARGET_PROFILE:-}" ]] \
-    || _lib_die "unsupported host architecture '${m}' (supported profiles: ${SUPPORTED_TARGET_PROFILES}). Cross-compilation and CPU emulation are not supported."
-  case "${TARGET_ARCH}" in
-    aarch64) msg="${NATIVE_HOST_MSG_ARM64}";  arch_re='aarch64|arm64' ;;
-    x86_64)  msg="${NATIVE_HOST_MSG_X86_64}"; arch_re='x86_64|amd64' ;;
-    *) _lib_die "profile ${TARGET_PROFILE} has unknown TARGET_ARCH '${TARGET_ARCH}'" ;;
+    || _lib_die "unsupported host '${os} ${m}' (release profiles: ${SUPPORTED_TARGET_PROFILES}; build-only: ${BUILD_ONLY_TARGET_PROFILES}). Cross-compilation and CPU emulation are not supported."
+  case "${TARGET_OS}/${TARGET_ARCH}" in
+    linux/aarch64) msg="${NATIVE_HOST_MSG_ARM64}";       arch_re='aarch64|arm64'; want_os=Linux ;;
+    linux/x86_64)  msg="${NATIVE_HOST_MSG_X86_64}";      arch_re='x86_64|amd64';  want_os=Linux ;;
+    macos/aarch64) msg="${NATIVE_HOST_MSG_MACOS_ARM64}"; arch_re='arm64';         want_os=Darwin ;;
+    *) _lib_die "profile ${TARGET_PROFILE} has unknown TARGET_OS/TARGET_ARCH '${TARGET_OS}/${TARGET_ARCH}'" ;;
   esac
+  [[ "${os}" == "${want_os}" ]] \
+    || _lib_die "${msg} (uname -s: ${os}; profile ${TARGET_PROFILE} needs ${want_os})"
   [[ "${m}" =~ ^(${arch_re})$ ]] \
     || _lib_die "${msg} (uname -m: ${m}; profile ${TARGET_PROFILE} needs ${TARGET_ARCH})"
   [[ "${TARGET_TRIPLE%%-*}" == "${TARGET_ARCH}" ]] \
@@ -46,15 +52,27 @@ assert_native_host() {
      && grep -qx enabled "/proc/sys/fs/binfmt_misc/qemu-${TARGET_ARCH}"; then
     _lib_die "${msg} (binfmt_misc qemu-${TARGET_ARCH} handler is enabled: CPU emulation detected)"
   fi
+  if [[ "${TARGET_OS}" == macos ]]; then
+    # The kernel answers for the hardware: hw.optional.arm64 is 1 only on Apple Silicon,
+    # and sysctl.proc_translated is 1 inside a Rosetta 2 (x86_64-translated) process.
+    v="$(sysctl -n hw.optional.arm64 2>/dev/null || true)"
+    [[ "${v}" == 1 ]] || _lib_die "${msg} (sysctl hw.optional.arm64 = '${v:-<missing>}', expected 1)"
+    v="$(sysctl -n sysctl.proc_translated 2>/dev/null || true)"
+    [[ "${v}" == 0 ]] || _lib_die "${msg} (sysctl sysctl.proc_translated = '${v:-<missing>}', expected 0: Rosetta 2 translation)"
+  fi
   # rustc must be a native toolchain building for its own host (no --target).
   rhost="$(rustc -vV | sed -n 's/^host: //p')"
   [[ "${rhost}" == "${TARGET_TRIPLE}" ]] \
     || _lib_die "${msg} (rustc host '${rhost}' != TARGET_TRIPLE '${TARGET_TRIPLE}')"
-  # CC/CXX must be native compilers (a cross gcc/clang reports a foreign machine).
+  # CC/CXX must be native compilers (a cross gcc/clang reports a foreign machine). Apple
+  # clang reports the arch as arm64 (arm64-apple-darwin24.6.0), i.e. NATIVE_ARCH.
   for tool in "${CC:-cc}" "${CXX:-c++}"; do
     mach="$("${tool}" -dumpmachine 2>/dev/null || true)"
-    [[ "${mach%%-*}" == "${TARGET_ARCH}" ]] \
+    [[ "${mach%%-*}" == "${NATIVE_ARCH}" ]] \
       || _lib_die "${msg} (${tool} -dumpmachine = '${mach:-<none>}')"
+    if [[ "${TARGET_OS}" == macos && "${mach}" != *-apple-darwin* ]]; then
+      _lib_die "${msg} (${tool} -dumpmachine = '${mach}', expected ${NATIVE_ARCH}-apple-darwin*)"
+    fi
   done
   # Knobs that would turn the build into a cross build (the crate forwards every CMAKE_*
   # env var to CMake, and cargo/cc-rs honour the rest).
@@ -66,7 +84,9 @@ assert_native_host() {
   if env | grep -qE '^CARGO_TARGET_[A-Z0-9_]+_(LINKER|RUNNER)='; then
     _lib_die "${msg} (a CARGO_TARGET_*_LINKER/RUNNER override is set)"
   fi
-  if [[ "${TARGET_ARCH}" == "x86_64" ]]; then
+  if [[ "${TARGET_OS}" == macos ]]; then
+    macos_host_cpu_check
+  elif [[ "${TARGET_ARCH}" == "x86_64" ]]; then
     # x86-64-v3 capability: CPUID/XGETBV + glibc hwcaps + /proc/cpuinfo, fail-closed. The
     # script prints "Host architecture / Required CPU baseline / x86-64-v3 capability".
     probe_json="$(mktemp)"
@@ -82,6 +102,47 @@ assert_native_host() {
       --arg feats "$(sed -n 's/^Features[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo 2>/dev/null | head -n1 || true)" \
       '{cpu_model: $model, cpuinfo_features: ($feats | split(" ") | map(select(. != "")))}')"
   fi
+}
+
+# Host CPU features that -mcpu=apple-m1 code can use (clang's apple-m1 target features,
+# as the kernel's hw.optional.* sysctls name them). Every Apple Silicon Mac has all of
+# them; a host (or VM) missing one could not run what it builds and is refused. A NEWER
+# host (M2..M4) is fine: the build never reads the host CPU, it only has to run M1 code.
+APPLE_M1_HOST_FEATURES="arm.FEAT_AES arm.FEAT_PMULL arm.FEAT_SHA1 arm.FEAT_SHA256 arm.FEAT_SHA512 arm.FEAT_SHA3 arm.FEAT_CRC32 arm.FEAT_LSE arm.FEAT_RDM arm.FEAT_FP16 arm.FEAT_FHM arm.FEAT_DotProd arm.FEAT_JSCVT arm.FEAT_FCMA arm.FEAT_LRCPC arm.FEAT_FlagM arm.FEAT_FlagM2 arm.FEAT_FRINTTS arm.FEAT_SB arm.FEAT_SSBS arm.FEAT_DPB neon neon_fp16"
+# macos_host_cpu_check: the apple-m1 capability gate of a macOS host (the counterpart of
+# scripts/check-x86-64-v3.sh). A missing sysctl fails, it is never assumed present. Sets
+# HOST_CPU_MODEL and HOST_CPU_JSON ({baseline, result, cpu_model, hw_model,
+# required_features, rosetta}).
+macos_host_cpu_check() {
+  local f v missing="" feats=""
+  for f in ${APPLE_M1_HOST_FEATURES}; do
+    v="$(sysctl -n "hw.optional.${f}" 2>/dev/null || true)"
+    [[ "${v}" == 1 ]] || missing+="hw.optional.${f}=${v:-<missing>} "
+    feats+="${f}=${v:-0}"$'\n'
+  done
+  HOST_CPU_MODEL="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+  echo "Host: $(uname -s) $(uname -m), ${HOST_CPU_MODEL:-unknown CPU}"
+  echo "Required CPU baseline: ${CPU_BASELINE}"
+  [[ -z "${missing}" ]] || _lib_die "${NATIVE_HOST_MSG_MACOS_ARM64} (host lacks apple-m1 features: ${missing})"
+  echo "apple-m1 capability: PASS"
+  HOST_CPU_JSON="$(printf '%s' "${feats}" \
+    | jq -R 'split("=") | {(.[0]): (.[1] == "1")}' | jq -s 'add // {}' \
+    | jq --arg model "${HOST_CPU_MODEL}" --arg hw "$(sysctl -n hw.model 2>/dev/null || true)" \
+         --arg baseline "${CPU_BASELINE}" \
+         '{baseline: $baseline, result: "PASS", cpu_model: $model, hw_model: $hw,
+           required_features: ., rosetta: false}')"
+}
+
+# assert_release_profile PROFILE: die unless PROFILE is a release variant
+# (SUPPORTED_TARGET_PROFILES). Every release step calls this, so a build-only profile
+# (BUILD_ONLY_TARGET_PROFILES) can be built and smoke-tested but never packaged, verified as
+# a release, or given release results.
+assert_release_profile() {
+  case " ${SUPPORTED_TARGET_PROFILES} " in *" $1 "*) return 0 ;; esac
+  case " ${BUILD_ONLY_TARGET_PROFILES} " in
+    *" $1 "*) _lib_die "target profile $1 is build-only, not a release variant (release variants: ${SUPPORTED_TARGET_PROFILES}; release integration: issue #22)" ;;
+  esac
+  _lib_die "'$1' is not a release target profile (release variants: ${SUPPORTED_TARGET_PROFILES})"
 }
 
 # --- Portable host utilities ----------------------------------------------------------
@@ -126,6 +187,13 @@ assert_no_build_env_overrides() {
     [[ "${!v:-}" != *target-feature* ]] \
       || _lib_die "${v} sets target-feature (the crate maps it to GGML_* ISA options): '${!v}'"
   done
+  # macOS: cc-rs, CMake and rustc all take the minimum OS from MACOSX_DEPLOYMENT_TARGET;
+  # the profile pins it (build.sh exports MACOS_DEPLOYMENT_TARGET), so a different
+  # inherited value is a conflicting build input, not something to silently replace.
+  if [[ "${TARGET_OS:-}" == macos && -n "${MACOSX_DEPLOYMENT_TARGET:-}" \
+        && "${MACOSX_DEPLOYMENT_TARGET}" != "${MACOS_DEPLOYMENT_TARGET}" ]]; then
+    _lib_die "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} conflicts with the profile's pinned ${MACOS_DEPLOYMENT_TARGET} — unset it"
+  fi
 }
 
 # --- Pinned sources -----------------------------------------------------------------
